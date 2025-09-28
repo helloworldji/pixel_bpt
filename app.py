@@ -138,6 +138,10 @@ async def cancel_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await update.message.reply_text('Operation cancelled.')
     return ConversationHandler.END
 
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Log Errors caused by Updates."""
+    logger.warning('Update "%s" caused error "%s"', update, context.error)
+
 async def post_init(application: Application) -> None:
     """Sets the bot commands in the Telegram menu after initialization."""
     commands = [
@@ -150,7 +154,7 @@ async def post_init(application: Application) -> None:
     await application.bot.set_my_commands(commands)
 
 def main() -> None:
-    """Start the bot."""
+    """Start the bot and register all handlers."""
     logger.info("Starting bot...")
     
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
@@ -164,7 +168,7 @@ def main() -> None:
         fallbacks=[CommandHandler("cancel", cancel_handler)],
     )
 
-    # --- Register Handlers ---
+    # --- Register all handlers here ---
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("about", about_command))
@@ -172,11 +176,15 @@ def main() -> None:
     application.add_handler(CommandHandler("chat", chat_handler))
     application.add_handler(ocr_conv_handler)
     
-    # A generic message handler to guide users who just type text
+    # Generic message handler for text that isn't a command
     async def guide_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Please use a command to interact with me. Type /help to see what I can do!")
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, guide_user))
 
+    # Add the error handler
+    application.add_error_handler(error_handler)
+
+    # Start the Bot
     application.run_polling()
 
 if __name__ == '__main__':
