@@ -187,7 +187,7 @@ async def main() -> None:
     # from the WEBHOOK_URL env var, which isn't available immediately.
     # We will retry asynchronously while the health check server runs.
     logger.info("Attempting to find WEBHOOK_URL from environment...")
-    WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+    WEBHOOK_URL = os.getenv("https://pixel-bpt.onrender.com")
     retries = 10
     while not WEBHOOK_URL and retries > 0:
         logger.warning(f"WEBHOOK_URL not found. Retrying in 5 seconds... ({retries} left)")
