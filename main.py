@@ -17,7 +17,6 @@ logger = logging.getLogger(__name__)
 try:
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
     TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-    # This URL is provided by the Render environment for the webhook
     WEBHOOK_URL = os.getenv("WEBHOOK_URL")
     genai.configure(api_key=GEMINI_API_KEY)
 except TypeError:
@@ -145,7 +144,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     logger.warning('Update "%s" caused error "%s"', update, context.error)
 
 async def post_init(application: Application) -> None:
-    """Sets the bot commands and the webhook after initialization."""
+    """Sets the bot commands after initialization."""
     commands = [
         BotCommand("start", "▶️ Welcome & Intro"),
         BotCommand("help", "❓ How to use the bot"),
@@ -154,22 +153,16 @@ async def post_init(application: Application) -> None:
         BotCommand("newchat", "🔄 Start a new conversation"),
     ]
     await application.bot.set_my_commands(commands)
-
-    # Set the webhook
-    if not WEBHOOK_URL:
-        logger.error("WEBHOOK_URL environment variable not set!")
-        return
-    
-    # The url_path is a secret path that Telegram will hit. Using the bot token is common practice.
-    await application.bot.set_webhook(
-        url=f"{WEBHOOK_URL}/{TELEGRAM_BOT_TOKEN}",
-        allowed_updates=Update.ALL_TYPES
-    )
+    # The webhook is now set in the main() function by run_webhook, so we remove it from here.
 
 def main() -> None:
     """Start the bot using webhooks."""
     logger.info("Starting bot in webhook mode...")
     
+    if not WEBHOOK_URL:
+        logger.error("WEBHOOK_URL environment variable not set!")
+        return
+
     # Render provides the port to listen on in the PORT environment variable. Default to 8080 for local testing.
     PORT = int(os.environ.get('PORT', '8080'))
 
@@ -200,7 +193,8 @@ def main() -> None:
     # Add the error handler
     application.add_error_handler(error_handler)
 
-    # Start the Bot with a webhook. It will listen on 0.0.0.0 for all incoming connections.
+    # Start the Bot with a webhook.
+    # The run_webhook function will also automatically set the webhook on Telegram servers.
     application.run_webhook(
         listen="0.0.0.0",
         port=PORT,
