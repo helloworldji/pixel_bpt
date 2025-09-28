@@ -55,9 +55,14 @@ user_conversations = {}
 WAITING_FOR_IMAGE = 1
 WAITING_FOR_SCREENSHOT = 2
 
-# Initialize Gemini models
-text_model = genai.GenerativeModel('gemini-pro')
-vision_model = genai.GenerativeModel('gemini-pro-vision')
+# Initialize Gemini 2.5 Flash model
+try:
+    model = genai.GenerativeModel('gemini-2.5-flash-preview-05-20')
+    logger.info("Successfully initialized Gemini 2.5 Flash model")
+except Exception as e:
+    logger.error(f"Failed to initialize Gemini 2.5 Flash model: {e}")
+    logger.info("Falling back to gemini-1.5-flash model")
+    model = genai.GenerativeModel('gemini-1.5-flash')
 
 # =========================
 # Bot Command Handlers
@@ -69,7 +74,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
         welcome_message = (
             f"👋 Hello {user.first_name}!\n\n"
-            "I'm your Gemini-powered AI assistant 🤖\n\n"
+            "I'm your Gemini 2.5 Flash powered AI assistant 🤖\n\n"
             "You can access all features through the commands - "
             "use the 'Menu' button to see what I can do!\n\n"
             "Credits: @AADI_IO"
@@ -107,6 +112,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/sshot - Analyze screenshots and provide solutions\n"
             "Example: Send /sshot and then send a screenshot for analysis\n\n"
             
+            "Powered by Gemini 2.5 Flash\n"
             "Credits: @AADI_IO"
         )
         await update.message.reply_text(help_text)
@@ -122,19 +128,20 @@ async def about_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Developer: @AADI_IO\n\n"
             "Core Technologies:\n"
             "• Telegram Bot API\n"
-            "• Google Gemini AI\n"
+            "• Google Gemini 2.5 Flash AI\n"
             "• FastAPI Web Framework\n"
             "• Python\n\n"
             "Features:\n"
             "• AI-powered conversations\n"
             "• Image text extraction (OCR)\n"
             "• Screenshot analysis & troubleshooting\n\n"
+            "Powered by Gemini 2.5 Flash\n"
             "Credits: @AADI_IO"
         )
         await update.message.reply_text(about_text)
     except Exception as e:
         logger.error(f"Error in about command: {e}")
-        await update.message.reply_text("About: Gemini AI Telegram Bot by @AADI_IO")
+        await update.message.reply_text("About: Gemini 2.5 Flash AI Telegram Bot by @AADI_IO")
 
 async def chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /chat command with Gemini AI"""
@@ -159,8 +166,8 @@ async def chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Send "typing" action
         await update.message.chat.send_action(action="typing")
         
-        # Generate response using Gemini with history
-        chat_session = text_model.start_chat(history=user_conversations[user_id])
+        # Generate response using Gemini 2.5 Flash with history
+        chat_session = model.start_chat(history=user_conversations[user_id])
         response = chat_session.send_message(question)
         
         # Update conversation history
@@ -230,7 +237,7 @@ async def ocr_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 async def process_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Process image for OCR"""
+    """Process image for OCR using Gemini 2.5 Flash"""
     if not update.message.photo:
         await update.message.reply_text(
             "Please send an image file. To cancel, send /cancel"
@@ -248,8 +255,8 @@ async def process_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Convert to PIL Image
         image = Image.open(io.BytesIO(photo_bytes))
         
-        # Process with Gemini Vision
-        response = vision_model.generate_content([
+        # Process with Gemini 2.5 Flash Vision
+        response = model.generate_content([
             "Extract all the text from this image. Return only the extracted text without any additional commentary or formatting.",
             image
         ])
@@ -307,7 +314,7 @@ async def sshot_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 async def analyze_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Analyze screenshot and provide solutions"""
+    """Analyze screenshot and provide solutions using Gemini 2.5 Flash"""
     if not update.message.photo:
         await update.message.reply_text(
             "Please send a screenshot image. To cancel, send /cancel"
@@ -325,20 +332,20 @@ async def analyze_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE)
         # Convert to PIL Image
         image = Image.open(io.BytesIO(photo_bytes))
         
-        # Analyze with Gemini Vision
+        # Analyze with Gemini 2.5 Flash
         analysis_prompt = """
-        Analyze this screenshot and provide:
+        Analyze this screenshot thoroughly and provide a structured response with:
 
-        1. Overview: What appears to be happening in this screenshot?
-        2. Key Elements: What are the main UI components, text, or error messages visible?
-        3. Issues Identified: If there are any problems, errors, or areas of concern, list them clearly.
-        4. Solutions/Recommendations: Provide step-by-step solutions or recommendations to fix any identified issues.
-        5. Best Practices: If applicable, suggest best practices to prevent similar issues.
+        1. **Overview**: Brief description of what's visible
+        2. **Key Elements**: Important UI components, text, or visual elements
+        3. **Issues & Analysis**: Any problems, errors, or notable observations
+        4. **Solutions & Recommendations**: Practical steps to resolve identified issues
+        5. **Best Practices**: Suggestions for prevention or improvement
 
-        Be specific, practical, and helpful. Focus on actionable advice.
+        Be specific, actionable, and focus on providing clear guidance.
         """
         
-        response = vision_model.generate_content([analysis_prompt, image])
+        response = model.generate_content([analysis_prompt, image])
         
         analysis_text = response.text.strip()
         
