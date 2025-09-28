@@ -17,10 +17,10 @@ logger = logging.getLogger(__name__)
 try:
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
     TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-    WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+    # We will get WEBHOOK_URL later inside the main function to avoid startup race conditions.
     genai.configure(api_key=GEMINI_API_KEY)
 except TypeError:
-    logger.error("API keys not found. Please set GEMINI_API_KEY, TELEGRAM_BOT_TOKEN, and WEBHOOK_URL as environment variables.")
+    logger.error("API keys not found. Please set GEMINI_API_KEY and TELEGRAM_BOT_TOKEN as environment variables.")
     exit()
 
 # --- Gemini Model Initialization ---
@@ -159,9 +159,11 @@ def main() -> None:
     """Start the bot using webhooks."""
     logger.info("Starting bot in webhook mode...")
     
+    # Get webhook URL from environment just before it's needed.
+    WEBHOOK_URL = os.getenv("WEBHOOK_URL")
     if not WEBHOOK_URL:
-        logger.error("WEBHOOK_URL environment variable not set!")
-        return
+        logger.error("WEBHOOK_URL environment variable not found!")
+        return # Exit if the URL isn't set, as webhook mode is impossible.
 
     # Render provides the port to listen on in the PORT environment variable. Default to 8080 for local testing.
     PORT = int(os.environ.get('PORT', '8080'))
