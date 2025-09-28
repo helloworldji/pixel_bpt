@@ -1,6 +1,7 @@
 import os
 import logging
 import asyncio
+import html
 import google.generativeai as genai
 from telegram import Update, BotCommand
 from telegram.ext import (
@@ -64,67 +65,76 @@ vision_model = genai.GenerativeModel('gemini-pro-vision')
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /start command"""
-    user = update.effective_user
-    welcome_message = (
-        f"👋 Hello {user.first_name}!\n\n"
-        "I'm your Gemini-powered AI assistant 🤖\n\n"
-        "**Available Features:**\n"
-        "• 💬 **/chat** - AI conversation\n"
-        "• 📷 **/ocr** - Extract text from images\n"
-        "• 🖼️ **/sshot** - Analyze screenshots & provide solutions\n\n"
-        "Use the 'Menu' button to see all commands!\n\n"
-        "Credits: @AADI_IO"
-    )
-    await update.message.reply_text(welcome_message, parse_mode='Markdown')
+    try:
+        user = update.effective_user
+        welcome_message = (
+            f"👋 Hello {user.first_name}!\n\n"
+            "I'm your Gemini-powered AI assistant 🤖\n\n"
+            "You can access all features through the commands - "
+            "use the 'Menu' button to see what I can do!\n\n"
+            "Credits: @AADI_IO"
+        )
+        await update.message.reply_text(welcome_message)
+    except Exception as e:
+        logger.error(f"Error in start command: {e}")
+        await update.message.reply_text("Welcome! Use the menu to see available commands.")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /help command"""
-    help_text = (
-        "🤖 **Available Commands:**\n\n"
-        
-        "**/start** - Welcome message and introduction\n"
-        "_Example: Just send /start_\n\n"
-        
-        "**/help** - This help guide\n"
-        "_Example: /help_\n\n"
-        
-        "**/about** - Information about the bot\n"
-        "_Example: /about_\n\n"
-        
-        "**/chat [your question]** - Chat with Gemini AI\n"
-        "_Example: /chat What is the capital of France?_\n"
-        "_Example: /chat Explain quantum computing in simple terms_\n\n"
-        
-        "**/newchat** - Reset your conversation history\n"
-        "_Example: /newchat_\n\n"
-        
-        "**/ocr** - Extract text from images\n"
-        "_Example: Send /ocr and then send an image_\n\n"
-        
-        "**/sshot** - Analyze screenshots and provide solutions\n"
-        "_Example: Send /sshot and then send a screenshot for analysis_\n\n"
-        
-        "Credits: @AADI_IO"
-    )
-    await update.message.reply_text(help_text, parse_mode='Markdown')
+    try:
+        help_text = (
+            "🤖 Available Commands:\n\n"
+            
+            "/start - Welcome message and introduction\n"
+            "Example: Just send /start\n\n"
+            
+            "/help - This help guide\n"
+            "Example: /help\n\n"
+            
+            "/about - Information about the bot\n"
+            "Example: /about\n\n"
+            
+            "/chat [your question] - Chat with Gemini AI\n"
+            "Example: /chat What is the capital of France?\n"
+            "Example: /chat Explain quantum computing in simple terms\n\n"
+            
+            "/newchat - Reset your conversation history\n"
+            "Example: /newchat\n\n"
+            
+            "/ocr - Extract text from images\n"
+            "Example: Send /ocr and then send an image\n\n"
+            
+            "/sshot - Analyze screenshots and provide solutions\n"
+            "Example: Send /sshot and then send a screenshot for analysis\n\n"
+            
+            "Credits: @AADI_IO"
+        )
+        await update.message.reply_text(help_text)
+    except Exception as e:
+        logger.error(f"Error in help command: {e}")
+        await update.message.reply_text("Help: Use /chat for AI conversations, /ocr for text extraction, /sshot for screenshot analysis.")
 
 async def about_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /about command"""
-    about_text = (
-        "🤖 **About This Bot**\n\n"
-        "**Developer:** @AADI_IO\n\n"
-        "**Core Technologies:**\n"
-        "• Telegram Bot API\n"
-        "• Google Gemini AI\n"
-        "• FastAPI Web Framework\n"
-        "• Python\n\n"
-        "**Features:**\n"
-        "• AI-powered conversations\n"
-        "• Image text extraction (OCR)\n"
-        "• Screenshot analysis & troubleshooting\n\n"
-        "Credits: @AADI_IO"
-    )
-    await update.message.reply_text(about_text, parse_mode='Markdown')
+    try:
+        about_text = (
+            "🤖 About This Bot\n\n"
+            "Developer: @AADI_IO\n\n"
+            "Core Technologies:\n"
+            "• Telegram Bot API\n"
+            "• Google Gemini AI\n"
+            "• FastAPI Web Framework\n"
+            "• Python\n\n"
+            "Features:\n"
+            "• AI-powered conversations\n"
+            "• Image text extraction (OCR)\n"
+            "• Screenshot analysis & troubleshooting\n\n"
+            "Credits: @AADI_IO"
+        )
+        await update.message.reply_text(about_text)
+    except Exception as e:
+        logger.error(f"Error in about command: {e}")
+        await update.message.reply_text("About: Gemini AI Telegram Bot by @AADI_IO")
 
 async def chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /chat command with Gemini AI"""
@@ -135,8 +145,7 @@ async def chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(message_text.split()) < 2:
         await update.message.reply_text(
             "Please provide a question after the /chat command.\n"
-            "Example: `/chat What is artificial intelligence?`",
-            parse_mode='Markdown'
+            "Example: /chat What is artificial intelligence?"
         )
         return
     
@@ -164,7 +173,9 @@ async def chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if len(user_conversations[user_id]) > 20:  # Keep last 10 exchanges
             user_conversations[user_id] = user_conversations[user_id][-20:]
         
-        await update.message.reply_text(f"{response.text}\n\nCredits: @AADI_IO")
+        # Escape any special characters that might cause formatting issues
+        safe_response = html.escape(response.text)
+        await update.message.reply_text(f"{safe_response}\n\nCredits: @AADI_IO")
         
     except Exception as e:
         logger.error(f"Error in chat command: {e}")
@@ -175,19 +186,23 @@ async def chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def newchat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /newchat command to reset conversation"""
-    user_id = update.effective_user.id
-    
-    if user_id in user_conversations:
-        user_conversations[user_id] = []
-        await update.message.reply_text(
-            "🔄 Conversation history cleared! Starting a new chat session.\n\n"
-            "Credits: @AADI_IO"
-        )
-    else:
-        await update.message.reply_text(
-            "You don't have an active chat session. Start one with /chat!\n\n"
-            "Credits: @AADI_IO"
-        )
+    try:
+        user_id = update.effective_user.id
+        
+        if user_id in user_conversations:
+            user_conversations[user_id] = []
+            await update.message.reply_text(
+                "🔄 Conversation history cleared! Starting a new chat session.\n\n"
+                "Credits: @AADI_IO"
+            )
+        else:
+            await update.message.reply_text(
+                "You don't have an active chat session. Start one with /chat!\n\n"
+                "Credits: @AADI_IO"
+            )
+    except Exception as e:
+        logger.error(f"Error in newchat command: {e}")
+        await update.message.reply_text("Error clearing conversation. Please try again.")
 
 # =========================
 # OCR Feature Implementation
@@ -195,17 +210,23 @@ async def newchat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def ocr_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start OCR conversation"""
-    await update.message.reply_text(
-        "📷 **OCR Text Extraction**\n\n"
-        "Please send the image you want me to scan for text.\n\n"
-        "To cancel, send /cancel",
-        parse_mode='Markdown'
-    )
-    return WAITING_FOR_IMAGE
+    try:
+        await update.message.reply_text(
+            "📷 OCR Text Extraction\n\n"
+            "Please send the image you want me to scan for text.\n\n"
+            "To cancel, send /cancel"
+        )
+        return WAITING_FOR_IMAGE
+    except Exception as e:
+        logger.error(f"Error in OCR start: {e}")
+        return ConversationHandler.END
 
 async def ocr_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Cancel OCR conversation"""
-    await update.message.reply_text("OCR operation cancelled.")
+    try:
+        await update.message.reply_text("OCR operation cancelled.")
+    except Exception as e:
+        logger.error(f"Error in OCR cancel: {e}")
     return ConversationHandler.END
 
 async def process_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -236,9 +257,10 @@ async def process_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
         extracted_text = response.text.strip()
         
         if extracted_text:
+            # Escape any special characters
+            safe_text = html.escape(extracted_text)
             await update.message.reply_text(
-                f"📝 **Extracted Text:**\n\n{extracted_text}\n\nCredits: @AADI_IO",
-                parse_mode='Markdown'
+                f"📝 Extracted Text:\n\n{safe_text}\n\nCredits: @AADI_IO"
             )
         else:
             await update.message.reply_text(
@@ -260,22 +282,28 @@ async def process_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def sshot_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start screenshot analysis conversation"""
-    await update.message.reply_text(
-        "🖼️ **Screenshot Analysis**\n\n"
-        "Please send the screenshot you want me to analyze.\n\n"
-        "I can help with:\n"
-        "• Error message analysis\n"
-        "• UI/UX feedback\n"
-        "• Technical troubleshooting\n"
-        "• General insights\n\n"
-        "To cancel, send /cancel",
-        parse_mode='Markdown'
-    )
-    return WAITING_FOR_SCREENSHOT
+    try:
+        await update.message.reply_text(
+            "🖼️ Screenshot Analysis\n\n"
+            "Please send the screenshot you want me to analyze.\n\n"
+            "I can help with:\n"
+            "• Error message analysis\n"
+            "• UI/UX feedback\n"
+            "• Technical troubleshooting\n"
+            "• General insights\n\n"
+            "To cancel, send /cancel"
+        )
+        return WAITING_FOR_SCREENSHOT
+    except Exception as e:
+        logger.error(f"Error in sshot start: {e}")
+        return ConversationHandler.END
 
 async def sshot_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Cancel screenshot analysis conversation"""
-    await update.message.reply_text("Screenshot analysis cancelled.")
+    try:
+        await update.message.reply_text("Screenshot analysis cancelled.")
+    except Exception as e:
+        logger.error(f"Error in sshot cancel: {e}")
     return ConversationHandler.END
 
 async def analyze_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -297,15 +325,15 @@ async def analyze_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE)
         # Convert to PIL Image
         image = Image.open(io.BytesIO(photo_bytes))
         
-        # Analyze with Gemini Vision - comprehensive prompt for screenshot analysis
+        # Analyze with Gemini Vision
         analysis_prompt = """
         Analyze this screenshot and provide:
 
-        1. **Overview**: What appears to be happening in this screenshot?
-        2. **Key Elements**: What are the main UI components, text, or error messages visible?
-        3. **Issues Identified**: If there are any problems, errors, or areas of concern, list them clearly.
-        4. **Solutions/Recommendations**: Provide step-by-step solutions or recommendations to fix any identified issues.
-        5. **Best Practices**: If applicable, suggest best practices to prevent similar issues.
+        1. Overview: What appears to be happening in this screenshot?
+        2. Key Elements: What are the main UI components, text, or error messages visible?
+        3. Issues Identified: If there are any problems, errors, or areas of concern, list them clearly.
+        4. Solutions/Recommendations: Provide step-by-step solutions or recommendations to fix any identified issues.
+        5. Best Practices: If applicable, suggest best practices to prevent similar issues.
 
         Be specific, practical, and helpful. Focus on actionable advice.
         """
@@ -315,9 +343,10 @@ async def analyze_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE)
         analysis_text = response.text.strip()
         
         if analysis_text:
+            # Escape any special characters
+            safe_analysis = html.escape(analysis_text)
             await update.message.reply_text(
-                f"🖼️ **Screenshot Analysis**\n\n{analysis_text}\n\nCredits: @AADI_IO",
-                parse_mode='Markdown'
+                f"🖼️ Screenshot Analysis\n\n{safe_analysis}\n\nCredits: @AADI_IO"
             )
         else:
             await update.message.reply_text(
@@ -334,21 +363,42 @@ async def analyze_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return ConversationHandler.END
 
 # =========================
+# Error Handler
+# =========================
+
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle errors in the telegram bot."""
+    logger.error(f"Exception while handling an update: {context.error}")
+    
+    try:
+        # Notify user about the error
+        if update and update.effective_message:
+            await update.effective_message.reply_text(
+                "Sorry, I encountered an error processing your request. Please try again."
+            )
+    except Exception as e:
+        logger.error(f"Error while sending error message: {e}")
+
+# =========================
 # Bot Setup & Webhook Configuration
 # =========================
 
 async def setup_commands(app: Application):
     """Setup bot commands menu"""
-    commands = [
-        BotCommand("start", "Start the bot"),
-        BotCommand("help", "Get help and usage guide"),
-        BotCommand("about", "About this bot"),
-        BotCommand("chat", "Chat with Gemini AI"),
-        BotCommand("newchat", "Reset conversation"),
-        BotCommand("ocr", "Extract text from images"),
-        BotCommand("sshot", "Analyze screenshots"),
-    ]
-    await app.bot.set_my_commands(commands)
+    try:
+        commands = [
+            BotCommand("start", "Start the bot"),
+            BotCommand("help", "Get help and usage guide"),
+            BotCommand("about", "About this bot"),
+            BotCommand("chat", "Chat with Gemini AI"),
+            BotCommand("newchat", "Reset conversation"),
+            BotCommand("ocr", "Extract text from images"),
+            BotCommand("sshot", "Analyze screenshots"),
+        ]
+        await app.bot.set_my_commands(commands)
+        logger.info("Bot commands menu set successfully")
+    except Exception as e:
+        logger.error(f"Error setting up commands: {e}")
 
 async def initialize_bot():
     """Initialize the Telegram bot and set webhook"""
@@ -382,6 +432,9 @@ async def initialize_bot():
             .request(HTTPXRequest(connect_timeout=30, read_timeout=30))
             .build()
         )
+        
+        # Add error handler
+        application.add_error_handler(error_handler)
         
         # Add handlers
         # OCR Conversation Handler
@@ -417,7 +470,7 @@ async def initialize_bot():
         application.add_handler(ocr_handler)
         application.add_handler(sshot_handler)
         
-        # CRITICAL FIX: Initialize the application properly
+        # Initialize the application properly
         await application.initialize()
         await application.start()
         logger.info("Telegram application initialized and started")
@@ -476,7 +529,7 @@ async def webhook_endpoint(token: str, request: Request):
         logger.warning(f"Invalid token received: {token}")
         return JSONResponse(
             content={"status": "invalid token"},
-            status_code=status.HTTP_401_UNANAUTHORIZED
+            status_code=status.HTTP_401_UNAUTHORIZED
         )
     
     if not application:
