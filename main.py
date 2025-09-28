@@ -2,223 +2,352 @@ import os
 import logging
 import asyncio
 import google.generativeai as genai
-from telegram import Update, File, BotCommand
+from telegram import Update, BotCommand
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
-    filters,
     ContextTypes,
     ConversationHandler,
+    filters
 )
+from telegram.request import HTTPXRequest
+from fastapi import FastAPI, Request, status
+from fastapi.responses import JSONResponse
+import uvicorn
 from PIL import Image
 import io
-import uvicorn
-from fastapi import FastAPI, Request, Response
 
-# --- 1. Basic Setup & Configuration ---
-
+# Configure logging
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-try:
-    TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-    genai.configure(api_key=GEMINI_API_KEY)
-except (TypeError, ValueError):
-    logger.error("FATAL: GEMINI_API_KEY and TELEGRAM_BOT_TOKEN must be set as environment variables.")
-    exit()
+# Load environment variables
+TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
+WEBHOOK_URL = os.getenv('WEBHOOK_URL')
 
-# --- 2. AI Model Initialization ---
-try:
-    text_model = genai.GenerativeModel('gemini-pro')
-    vision_model = genai.GenerativeModel('gemini-pro-vision')
-except Exception as e:
-    logger.error(f"FATAL: Could not initialize Gemini models: {e}")
-    exit()
+# Validate required environment variables
+if not TELEGRAM_TOKEN:
+    logger.error("TELEGRAM_BOT_TOKEN environment variable not set")
+    exit(1)
+if not GEMINI_API_KEY:
+    logger.error("GEMINI_API_KEY environment variable not set")
+    exit(1)
 
-# --- 3. Conversation Handler States ---
+# Configure Gemini AI
+genai.configure(api_key=GEMINI_API_KEY)
+
+# Initialize FastAPI app
+app = FastAPI(title="Telegram Gemini Bot")
+
+# Global variable for Telegram application
+telegram_app = None
+
+# Store conversation history
+user_conversations = {}
+
+# Conversation states for OCR
 WAITING_FOR_IMAGE = 1
 
-# --- 4. Bot Command Handlers ---
+# Initialize Gemini models
+text_model = genai.GenerativeModel('gemini-pro')
+vision_model = genai.GenerativeModel('gemini-pro-vision')
 
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_name = update.effective_user.first_name
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /start command"""
+    user = update.effective_user
     welcome_message = (
-        f"👋 **Hello {user_name}!**\n\n"
-        "I am an AI assistant powered by Google Gemini.\n\n"
-        "I have several features, each triggered by a specific command. "
-        "This makes it easy for you to get exactly what you need.\n\n"
-        "👉 Click the **Menu** button below (or type `/`) to see all available commands and get started!\n\n"
-        "**Credits:** @AADI_IO"
+        f"👋 Hello {user.first_name}!\n\n"
+        "I'm your Gemini-powered AI assistant 🤖\n\n"
+        "You can access all features through the commands - "
+        "use the 'Menu' button to see what I can do!\n\n"
+        "Credits: @AADI_IO"
     )
-    await update.message.reply_text(welcome_message, parse_mode='Markdown')
+    await update.message.reply_text(welcome_message)
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /help command"""
     help_text = (
-        "**📖 How to Use This Bot**\n\n"
-        "Here is a list of all my commands:\n\n"
-        "🤖 **/chat [your question]**\n"
-        "Engage in a conversation. Just type your question after the command.\n"
-        "  *Example:* `/chat What are the best places to visit in India?`\n\n"
-        "📄 **/ocr**\n"
-        "Extract text from an image. After sending this command, I will prompt you to send the photo.\n\n"
-        "🔄 **/newchat**\n"
-        "Clears our previous conversation history, allowing us to start fresh.\n\n"
-        "ℹ️ **/about**\n"
-        "Displays information about me, my developer, and the technology I use."
+        "🤖 **Available Commands:**\n\n"
+        
+        "**/start** - Welcome message and introduction\n"
+        "_Example: Just send /start_\n\n"
+        
+        "**/help** - This help guide\n"
+        "_Example: /help_\n\n"
+        
+        "**/about** - Information about the bot\n"
+        "_Example: /about_\n\n"
+        
+        "**/chat [your question]** - Chat with Gemini AI\n"
+        "_Example: /chat What is the capital of France?_\n"
+        "_Example: /chat Explain quantum computing in simple terms_\n\n"
+        
+        "**/newchat** - Reset your conversation history\n"
+        "_Example: /newchat_\n\n"
+        
+        "**/ocr** - Extract text from images\n"
+        "_Example: Send /ocr and then send an image_\n\n"
+        
+        "Credits: @AADI_IO"
     )
     await update.message.reply_text(help_text, parse_mode='Markdown')
 
-async def about_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def about_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /about command"""
     about_text = (
-        "**ℹ️ About This Bot**\n\n"
-        "This bot uses Google's powerful Gemini API to bring advanced AI features to your Telegram chat.\n\n"
-        "**Developer:** @AADI_IO\n"
-        "**Technology:** Python, `python-telegram-bot`, Google Gemini"
+        "🤖 **About This Bot**\n\n"
+        "**Developer:** @AADI_IO\n\n"
+        "**Core Technologies:**\n"
+        "• Telegram Bot API\n"
+        "• Google Gemini AI\n"
+        "• FastAPI Web Framework\n"
+        "• Python\n\n"
+        "This bot demonstrates the integration of Google's Gemini AI "
+        "with Telegram to provide intelligent conversation and image "
+        "analysis capabilities.\n\n"
+        "Credits: @AADI_IO"
     )
     await update.message.reply_text(about_text, parse_mode='Markdown')
 
-async def newchat_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if 'chat_session' in context.user_data:
-        del context.user_data['chat_session']
-    await update.message.reply_text("✅ Conversation history cleared. Let's start a fresh chat!")
-
-# --- 5. Feature Logic Handlers ---
-
-async def chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_message = " ".join(context.args)
-    if not user_message:
-        await update.message.reply_text("Please provide a question after the `/chat` command.\n*Example:* `/chat Who are you?`", parse_mode='Markdown')
+async def chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /chat command with Gemini AI"""
+    user_id = update.effective_user.id
+    message_text = update.message.text
+    
+    # Extract the question after /chat command
+    if len(message_text.split()) < 2:
+        await update.message.reply_text(
+            "Please provide a question after the /chat command.\n"
+            "Example: /chat What is artificial intelligence?"
+        )
         return
-
-    logger.info(f"Chat query from {update.effective_user.first_name}")
-    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action='typing')
+    
+    question = ' '.join(message_text.split()[1:])
+    
     try:
-        if 'chat_session' not in context.user_data:
-            context.user_data['chat_session'] = text_model.start_chat(history=[])
-        chat = context.user_data['chat_session']
-        response = await asyncio.to_thread(chat.send_message, user_message)
-        await update.message.reply_text(response.text)
+        # Initialize conversation history if not exists
+        if user_id not in user_conversations:
+            user_conversations[user_id] = []
+        
+        # Add user message to history
+        user_conversations[user_id].append({"role": "user", "parts": [question]})
+        
+        # Send "typing" action
+        await update.message.chat.send_action(action="typing")
+        
+        # Generate response using Gemini
+        chat_session = text_model.start_chat(history=user_conversations[user_id][:-1])
+        response = chat_session.send_message(question)
+        
+        # Add assistant response to history
+        user_conversations[user_id].append({"role": "model", "parts": [response.text]})
+        
+        # Limit conversation history to prevent excessive memory usage
+        if len(user_conversations[user_id]) > 20:  # Keep last 10 exchanges
+            user_conversations[user_id] = user_conversations[user_id][-20:]
+        
+        await update.message.reply_text(f"{response.text}\n\nCredits: @AADI_IO")
+        
     except Exception as e:
-        logger.error(f"Error in chat_handler: {e}")
-        await update.message.reply_text("Sorry, an error occurred while processing your request. Please try starting a `/newchat`.")
+        logger.error(f"Error in chat command: {e}")
+        await update.message.reply_text(
+            "Sorry, I encountered an error processing your request. Please try again."
+        )
 
-async def ocr_start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text("Please send the image you want me to scan for text. To cancel, send /cancel.")
+async def newchat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /newchat command to reset conversation"""
+    user_id = update.effective_user.id
+    
+    if user_id in user_conversations:
+        user_conversations[user_id] = []
+        await update.message.reply_text(
+            "🔄 Conversation history cleared! Starting a new chat session.\n\n"
+            "Credits: @AADI_IO"
+        )
+    else:
+        await update.message.reply_text(
+            "You don't have an active chat session. Start one with /chat!\n\n"
+            "Credits: @AADI_IO"
+        )
+
+async def ocr_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start OCR conversation"""
+    await update.message.reply_text(
+        "📷 Please send the image you want me to scan for text.\n\n"
+        "To cancel, send /cancel"
+    )
     return WAITING_FOR_IMAGE
 
-async def ocr_image_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    logger.info(f"Received image for OCR from {update.effective_user.first_name}")
-    await update.message.reply_text("⏳ Processing your image, this may take a moment...")
-    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action='typing')
-    try:
-        photo_file: File = await update.message.photo[-1].get_file()
-        file_bytes = await photo_file.download_as_bytearray()
-        img = Image.open(io.BytesIO(file_bytes))
-        prompt = "Extract all text from this image. Present it clearly and accurately."
-        response = await asyncio.to_thread(vision_model.generate_content, [prompt, img])
-        final_response = (
-            f"✅ **Text Extracted:**\n\n---\n\n{response.text}\n\n---\n\n"
-            "**Credits:** @AADI_IO"
+async def ocr_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cancel OCR conversation"""
+    await update.message.reply_text("OCR operation cancelled.")
+    return ConversationHandler.END
+
+async def process_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Process image for OCR"""
+    if not update.message.photo:
+        await update.message.reply_text(
+            "Please send an image file. To cancel, send /cancel"
         )
-        await update.message.reply_text(final_response, parse_mode='Markdown')
+        return WAITING_FOR_IMAGE
+    
+    try:
+        # Send "typing" action
+        await update.message.chat.send_action(action="typing")
+        
+        # Get the highest quality photo
+        photo_file = await update.message.photo[-1].get_file()
+        photo_bytes = await photo_file.download_as_bytearray()
+        
+        # Convert to PIL Image
+        image = Image.open(io.BytesIO(photo_bytes))
+        
+        # Process with Gemini Vision
+        response = vision_model.generate_content([
+            "Extract all the text from this image. Return only the extracted text without any additional commentary or formatting.",
+            image
+        ])
+        
+        extracted_text = response.text.strip()
+        
+        if extracted_text:
+            await update.message.reply_text(
+                f"📝 **Extracted Text:**\n\n{extracted_text}\n\nCredits: @AADI_IO",
+                parse_mode='Markdown'
+            )
+        else:
+            await update.message.reply_text(
+                "No text could be extracted from the image.\n\nCredits: @AADI_IO"
+            )
+            
     except Exception as e:
-        logger.error(f"Error in ocr_image_handler: {e}")
-        await update.message.reply_text("Sorry, I couldn't process that image. Please try the `/ocr` command again.")
+        logger.error(f"Error in OCR processing: {e}")
+        await update.message.reply_text(
+            "Sorry, I encountered an error processing the image. Please try again.\n\n"
+            "Credits: @AADI_IO"
+        )
+    
     return ConversationHandler.END
 
-async def ocr_cancel_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text('Operation cancelled.')
-    return ConversationHandler.END
-
-# --- 6. Telegram Application Setup ---
-
-ptb_application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-
-# --- 7. Web Server (FastAPI) Setup ---
-
-app = FastAPI()
+async def setup_commands(application: Application):
+    """Setup bot commands menu"""
+    commands = [
+        BotCommand("start", "Start the bot"),
+        BotCommand("help", "Get help and usage guide"),
+        BotCommand("about", "About this bot"),
+        BotCommand("chat", "Chat with Gemini AI"),
+        BotCommand("newchat", "Reset conversation"),
+        BotCommand("ocr", "Extract text from images"),
+    ]
+    await application.bot.set_my_commands(commands)
 
 async def initialize_bot():
-    """Initializes the bot, sets commands, and sets the webhook."""
-    logger.info("Initializing bot...")
-
-    # Define bot commands
-    commands = [
-        BotCommand("start", "▶️ Welcome & Intro"),
-        BotCommand("help", "❓ How to use the bot"),
-        BotCommand("chat", "🤖 Chat with the AI"),
-        BotCommand("ocr", "📄 Extract text from image"),
-        BotCommand("newchat", "🔄 Start a new conversation"),
-    ]
-    await ptb_application.bot.set_my_commands(commands)
+    """Initialize the Telegram bot and set webhook"""
+    global telegram_app
     
-    # Retry logic to get the WEBHOOK_URL from Render's environment
-    WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-    retries = 10
-    while not WEBHOOK_URL and retries > 0:
-        logger.warning(f"WEBHOOK_URL not found. Retrying in 5 seconds... ({retries} left)")
-        await asyncio.sleep(5)
-        WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-        retries -= 1
-
-    if WEBHOOK_URL:
-        webhook_path = f"/{TELEGRAM_BOT_TOKEN}"
-        await ptb_application.bot.set_webhook(url=f"{WEBHOOK_URL}{webhook_path}")
-        logger.info(f"Webhook set successfully to {WEBHOOK_URL}{webhook_path}")
-    else:
-        logger.error("FATAL: WEBHOOK_URL not found after multiple retries. Webhook not set.")
+    # Wait for WEBHOOK_URL to be available (for Render deployment)
+    max_retries = 24  # 2 minutes at 5-second intervals
+    for i in range(max_retries):
+        webhook_url = os.getenv('WEBHOOK_URL')
+        if webhook_url:
+            logger.info(f"WEBHOOK_URL found: {webhook_url}")
+            break
+        elif i == max_retries - 1:
+            logger.error("WEBHOOK_URL not found after 2 minutes. Exiting.")
+            return
+        else:
+            logger.info(f"Waiting for WEBHOOK_URL... (attempt {i+1}/{max_retries})")
+            await asyncio.sleep(5)
+    
+    # Initialize Telegram application
+    telegram_app = (
+        Application.builder()
+        .token(TELEGRAM_TOKEN)
+        .request(HTTPXRequest(connect_timeout=30, read_timeout=30))
+        .build()
+    )
+    
+    # Add handlers
+    # OCR Conversation Handler
+    ocr_handler = ConversationHandler(
+        entry_points=[CommandHandler("ocr", ocr_start)],
+        states={
+            WAITING_FOR_IMAGE: [
+                MessageHandler(filters.PHOTO, process_image),
+                CommandHandler("cancel", ocr_cancel)
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", ocr_cancel)],
+    )
+    
+    # Regular command handlers
+    telegram_app.add_handler(CommandHandler("start", start_command))
+    telegram_app.add_handler(CommandHandler("help", help_command))
+    telegram_app.add_handler(CommandHandler("about", about_command))
+    telegram_app.add_handler(CommandHandler("chat", chat_command))
+    telegram_app.add_handler(CommandHandler("newchat", newchat_command))
+    telegram_app.add_handler(ocr_handler)
+    
+    # Setup commands menu
+    await setup_commands(telegram_app)
+    
+    # Set webhook
+    webhook_url = f"{WEBHOOK_URL}/{TELEGRAM_TOKEN}"
+    await telegram_app.bot.set_webhook(webhook_url)
+    logger.info(f"Webhook set to: {webhook_url}")
+    
+    logger.info("Bot initialization completed successfully!")
 
 @app.on_event("startup")
 async def startup_event():
-    """On startup, create a background task to initialize the bot."""
+    """Initialize bot on startup"""
+    logger.info("Starting up FastAPI application...")
     asyncio.create_task(initialize_bot())
 
 @app.get("/")
-def health_check():
-    """This endpoint is called by Render to check if the service is live."""
-    return {"status": "ok"}
+@app.head("/")
+async def health_check():
+    """Health check endpoint for Render"""
+    return JSONResponse(
+        content={"status": "ok"},
+        status_code=status.HTTP_200_OK
+    )
 
 @app.post("/{token}")
-async def process_telegram_update(token: str, request: Request):
-    """This endpoint receives the updates from Telegram."""
-    if token != TELEGRAM_BOT_TOKEN:
-        return Response(status_code=403)
+async def webhook_endpoint(token: str, request: Request):
+    """Webhook endpoint for Telegram updates"""
+    if token != TELEGRAM_TOKEN:
+        logger.warning(f"Invalid token received: {token}")
+        return JSONResponse(
+            content={"status": "invalid token"},
+            status_code=status.HTTP_401_UNAUTHORIZED
+        )
     
     try:
-        update_data = await request.json()
-        update = Update.de_json(data=update_data, bot=ptb_application.bot)
-        await ptb_application.process_update(update)
-        return Response(status_code=200)
+        data = await request.json()
+        update = Update.de_json(data, telegram_app.bot)
+        await telegram_app.process_update(update)
+        return JSONResponse(
+            content={"status": "ok"},
+            status_code=status.HTTP_200_OK
+        )
     except Exception as e:
-        logger.error(f"Error processing update: {e}")
-        return Response(status_code=500)
+        logger.error(f"Error processing webhook: {e}")
+        return JSONResponse(
+            content={"status": "error"},
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
 
-# --- 8. Main Execution ---
-
-if __name__ == '__main__':
-    # Add all handlers to the application
-    ocr_conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("ocr", ocr_start_handler)],
-        states={WAITING_FOR_IMAGE: [MessageHandler(filters.PHOTO, ocr_image_handler)]},
-        fallbacks=[CommandHandler("cancel", ocr_cancel_handler)],
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=port,
+        log_level="info"
     )
-    ptb_application.add_handler(CommandHandler("start", start_command))
-    ptb_application.add_handler(CommandHandler("help", help_command))
-    ptb_application.add_handler(CommandHandler("about", about_command))
-    ptb_application.add_handler(CommandHandler("newchat", newchat_command))
-    ptb_application.add_handler(CommandHandler("chat", chat_handler))
-    ptb_application.add_handler(ocr_conv_handler)
-    
-    async def guide_user_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.message.reply_text("Please use a command to interact with me. Click the 'Menu' button or type /help to see what I can do!")
-    ptb_application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, guide_user_handler))
-
-    # Run the web server
-    PORT = int(os.environ.get('PORT', '8080'))
-    uvicorn.run(app, host="0.0.0.0", port=PORT)
-
