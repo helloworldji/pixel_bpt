@@ -45,7 +45,7 @@ genai.configure(api_key=GEMINI_API_KEY)
 app = FastAPI(title="Telegram Gemini Bot")
 
 # Global variable for Telegram application
-telegram_app = None
+application = None
 
 # Store conversation history
 user_conversations = {}
@@ -234,7 +234,7 @@ async def process_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     return ConversationHandler.END
 
-async def setup_commands(application: Application):
+async def setup_commands(app: Application):
     """Setup bot commands menu"""
     commands = [
         BotCommand("start", "Start the bot"),
@@ -244,18 +244,20 @@ async def setup_commands(application: Application):
         BotCommand("newchat", "Reset conversation"),
         BotCommand("ocr", "Extract text from images"),
     ]
-    await application.bot.set_my_commands(commands)
+    await app.bot.set_my_commands(commands)
 
 async def initialize_bot():
     """Initialize the Telegram bot and set webhook"""
-    global telegram_app
+    global application
     
     # Wait for WEBHOOK_URL to be available (for Render deployment)
     max_retries = 24  # 2 minutes at 5-second intervals
+    webhook_url_env = None
+    
     for i in range(max_retries):
-        webhook_url = os.getenv('WEBHOOK_URL')
-        if webhook_url:
-            logger.info(f"WEBHOOK_URL found: {webhook_url}")
+        webhook_url_env = os.getenv('WEBHOOK_URL')
+        if webhook_url_env:
+            logger.info(f"WEBHOOK_URL found: {webhook_url_env}")
             break
         elif i == max_retries - 1:
             logger.error("WEBHOOK_URL not found after 2 minutes. Exiting.")
@@ -264,50 +266,76 @@ async def initialize_bot():
             logger.info(f"Waiting for WEBHOOK_URL... (attempt {i+1}/{max_retries})")
             await asyncio.sleep(5)
     
-    # Initialize Telegram application
-    telegram_app = (
-        Application.builder()
-        .token(TELEGRAM_TOKEN)
-        .request(HTTPXRequest(connect_timeout=30, read_timeout=30))
-        .build()
-    )
-    
-    # Add handlers
-    # OCR Conversation Handler
-    ocr_handler = ConversationHandler(
-        entry_points=[CommandHandler("ocr", ocr_start)],
-        states={
-            WAITING_FOR_IMAGE: [
-                MessageHandler(filters.PHOTO, process_image),
-                CommandHandler("cancel", ocr_cancel)
-            ],
-        },
-        fallbacks=[CommandHandler("cancel", ocr_cancel)],
-    )
-    
-    # Regular command handlers
-    telegram_app.add_handler(CommandHandler("start", start_command))
-    telegram_app.add_handler(CommandHandler("help", help_command))
-    telegram_app.add_handler(CommandHandler("about", about_command))
-    telegram_app.add_handler(CommandHandler("chat", chat_command))
-    telegram_app.add_handler(CommandHandler("newchat", newchat_command))
-    telegram_app.add_handler(ocr_handler)
-    
-    # Setup commands menu
-    await setup_commands(telegram_app)
-    
-    # Set webhook
-    webhook_url = f"{WEBHOOK_URL}/{TELEGRAM_TOKEN}"
-    await telegram_app.bot.set_webhook(webhook_url)
-    logger.info(f"Webhook set to: {webhook_url}")
-    
-    logger.info("Bot initialization completed successfully!")
+    if not webhook_url_env:
+        logger.error("WEBHOOK_URL not available after retries")
+        return
+
+    try:
+        # Initialize Telegram application
+        application = (
+            Application.builder()
+            .token(TELEGRAM_TOKEN)
+            .request(HTTPXRequest(connect_timeout=30, read_timeout=30))
+            .build()
+        )
+        
+        # Add handlers
+        # OCR Conversation Handler
+        ocr_handler = ConversationHandler(
+            entry_points=[CommandHandler("ocr", ocr_start)],
+            states={
+                WAITING_FOR_IMAGE: [
+                    MessageHandler(filters.PHOTO, process_image),
+                    CommandHandler("cancel", ocr_cancel)
+                ],
+            },
+            fallbacks=[CommandHandler("cancel", ocr_cancel)],
+        )
+        
+        # Regular command handlers
+        application.add_handler(CommandHandler("start", start_command))
+        application.add_handler(CommandHandler("help", help_command))
+        application.add_handler(CommandHandler("about", about_command))
+        application.add_handler(CommandHandler("chat", chat_command))
+        application.add_handler(CommandHandler("newchat", newchat_command))
+        application.add_handler(ocr_handler)
+        
+        # Initialize the application
+        await application.initialize()
+        await application.start()
+        logger.info("Telegram application initialized and started")
+        
+        # Setup commands menu
+        await setup_commands(application)
+        
+        # Set webhook
+        webhook_url = f"{webhook_url_env}/{TELEGRAM_TOKEN}"
+        await application.bot.set_webhook(webhook_url)
+        logger.info(f"Webhook set to: {webhook_url}")
+        
+        logger.info("Bot initialization completed successfully!")
+        
+    except Exception as e:
+        logger.error(f"Error during bot initialization: {e}")
+        if application:
+            await application.stop()
+        raise
 
 @app.on_event("startup")
 async def startup_event():
     """Initialize bot on startup"""
     logger.info("Starting up FastAPI application...")
     asyncio.create_task(initialize_bot())
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Shutdown bot application properly"""
+    global application
+    if application:
+        logger.info("Shutting down Telegram application...")
+        await application.stop()
+        await application.shutdown()
+        logger.info("Telegram application stopped successfully")
 
 @app.get("/")
 @app.head("/")
@@ -321,6 +349,8 @@ async def health_check():
 @app.post("/{token}")
 async def webhook_endpoint(token: str, request: Request):
     """Webhook endpoint for Telegram updates"""
+    global application
+    
     if token != TELEGRAM_TOKEN:
         logger.warning(f"Invalid token received: {token}")
         return JSONResponse(
@@ -328,10 +358,17 @@ async def webhook_endpoint(token: str, request: Request):
             status_code=status.HTTP_401_UNAUTHORIZED
         )
     
+    if not application:
+        logger.error("Application not initialized yet")
+        return JSONResponse(
+            content={"status": "service unavailable"},
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE
+        )
+    
     try:
         data = await request.json()
-        update = Update.de_json(data, telegram_app.bot)
-        await telegram_app.process_update(update)
+        update = Update.de_json(data, application.bot)
+        await application.process_update(update)
         return JSONResponse(
             content={"status": "ok"},
             status_code=status.HTTP_200_OK
