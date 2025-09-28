@@ -2,4 +2,5 @@ python-telegram-bot
 google-generativeai
 Pillow
 python-dotenv
+fastapi
 uvicorn
