@@ -868,7 +868,8 @@ async def webhook_endpoint(token: str, request: Request):
         )
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 8000))
+    # Use Render's PORT environment variable (default to 10000 for Render)
+    port = int(os.getenv("PORT", 10000))
     uvicorn.run(
         app,
         host="0.0.0.0",
