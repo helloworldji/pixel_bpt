@@ -43,7 +43,7 @@ except Exception as e:
 # --- 3. Conversation Handler States ---
 WAITING_FOR_IMAGE = 1
 
-# --- 4. Bot Command Handlers (No changes needed here) ---
+# --- 4. Bot Command Handlers ---
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_name = update.effective_user.first_name
@@ -87,7 +87,7 @@ async def newchat_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         del context.user_data['chat_session']
     await update.message.reply_text("✅ Conversation history cleared. Let's start a fresh chat!")
 
-# --- 5. Feature Logic Handlers (No changes needed here) ---
+# --- 5. Feature Logic Handlers ---
 
 async def chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_message = " ".join(context.args)
@@ -137,42 +137,17 @@ async def ocr_cancel_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 # --- 6. Telegram Application Setup ---
 
-# This function builds the PTB application and registers all the handlers
-def setup_application() -> Application:
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-
-    ocr_conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("ocr", ocr_start_handler)],
-        states={WAITING_FOR_IMAGE: [MessageHandler(filters.PHOTO, ocr_image_handler)]},
-        fallbacks=[CommandHandler("cancel", ocr_cancel_handler)],
-    )
-
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("about", about_command))
-    application.add_handler(CommandHandler("newchat", newchat_command))
-    application.add_handler(CommandHandler("chat", chat_handler))
-    application.add_handler(ocr_conv_handler)
-    
-    async def guide_user_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.message.reply_text("Please use a command to interact with me. Click the 'Menu' button or type /help to see what I can do!")
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, guide_user_handler))
-
-    return application
-
-ptb_application = setup_application()
+ptb_application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
 # --- 7. Web Server (FastAPI) Setup ---
 
-# This is our web application
 app = FastAPI()
 
-@app.on_event("startup")
-async def startup_event():
-    """This function runs when the web server starts up."""
-    logger.info("Application startup...")
-    
-    # Set bot commands
+async def initialize_bot():
+    """Initializes the bot, sets commands, and sets the webhook."""
+    logger.info("Initializing bot...")
+
+    # Define bot commands
     commands = [
         BotCommand("start", "▶️ Welcome & Intro"),
         BotCommand("help", "❓ How to use the bot"),
@@ -192,12 +167,16 @@ async def startup_event():
         retries -= 1
 
     if WEBHOOK_URL:
-        # Once we have the URL, we set the webhook
         webhook_path = f"/{TELEGRAM_BOT_TOKEN}"
         await ptb_application.bot.set_webhook(url=f"{WEBHOOK_URL}{webhook_path}")
         logger.info(f"Webhook set successfully to {WEBHOOK_URL}{webhook_path}")
     else:
         logger.error("FATAL: WEBHOOK_URL not found after multiple retries. Webhook not set.")
+
+@app.on_event("startup")
+async def startup_event():
+    """On startup, create a background task to initialize the bot."""
+    asyncio.create_task(initialize_bot())
 
 @app.get("/")
 def health_check():
@@ -222,8 +201,24 @@ async def process_telegram_update(token: str, request: Request):
 # --- 8. Main Execution ---
 
 if __name__ == '__main__':
-    # Render provides the PORT environment variable.
+    # Add all handlers to the application
+    ocr_conv_handler = ConversationHandler(
+        entry_points=[CommandHandler("ocr", ocr_start_handler)],
+        states={WAITING_FOR_IMAGE: [MessageHandler(filters.PHOTO, ocr_image_handler)]},
+        fallbacks=[CommandHandler("cancel", ocr_cancel_handler)],
+    )
+    ptb_application.add_handler(CommandHandler("start", start_command))
+    ptb_application.add_handler(CommandHandler("help", help_command))
+    ptb_application.add_handler(CommandHandler("about", about_command))
+    ptb_application.add_handler(CommandHandler("newchat", newchat_command))
+    ptb_application.add_handler(CommandHandler("chat", chat_handler))
+    ptb_application.add_handler(ocr_conv_handler)
+    
+    async def guide_user_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await update.message.reply_text("Please use a command to interact with me. Click the 'Menu' button or type /help to see what I can do!")
+    ptb_application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, guide_user_handler))
+
+    # Run the web server
     PORT = int(os.environ.get('PORT', '8080'))
-    # Uvicorn runs our FastAPI web server.
     uvicorn.run(app, host="0.0.0.0", port=PORT)
 
