@@ -2,17 +2,23 @@ import os
 import logging
 import asyncio
 import html
+import uuid
+import string
+import random
+import requests
 import google.generativeai as genai
-from telegram import Update, BotCommand, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from telegram import Update, BotCommand, ReplyKeyboardMarkup, ReplyKeyboardRemove, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
     ContextTypes,
     ConversationHandler,
+    CallbackQueryHandler,
     filters
 )
 from telegram.request import HTTPXRequest
+from telegram.error import BadRequest, Forbidden
 from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
 import uvicorn
@@ -52,7 +58,15 @@ application = None
 user_conversations = {}
 
 # Conversation states
-MAIN_MENU, CHAT_MODE, OCR_MODE, SSHOT_MODE = range(4)
+MAIN_MENU, CHAT_MODE, OCR_MODE, SSHOT_MODE, INSTA_MODE = range(5)
+
+# Instagram Reset Bot Configuration
+CHANNELS = [
+    {"url": "https://t.me/+YEObPfKXsK1hNjU9", "name": "Main Channel", "id": "-1002628211220"},
+    {"url": "https://t.me/pytimebruh", "name": "Backup 1", "id": "@pytimebruh"},
+    {"url": "https://t.me/HazyPy", "name": "Backup 2", "id": "@HazyPy"},
+    {"url": "https://t.me/HazyGC", "name": "Chat Group", "id": "@HazyGC"}
+]
 
 # Initialize Gemini 2.5 Flash model
 try:
@@ -62,6 +76,216 @@ except Exception as e:
     logger.error(f"Failed to initialize Gemini 2.5 Flash model: {e}")
     logger.info("Falling back to gemini-1.5-flash model")
     model = genai.GenerativeModel('gemini-1.5-flash')
+
+# =========================
+# Instagram Reset Bot Feature
+# =========================
+
+async def check_channel_subscription(user_id: int, context: ContextTypes.DEFAULT_TYPE):
+    """Check if user is subscribed to all channels"""
+    not_joined = []
+    
+    for channel in CHANNELS:
+        try:
+            chat_id = channel['id']
+            member = await context.bot.get_chat_member(chat_id, user_id)
+            
+            if member.status in ['left', 'kicked']:
+                not_joined.append(channel)
+                logger.info(f"User {user_id} not in channel {channel['name']}: {member.status}")
+                
+        except BadRequest as e:
+            logger.error(f"BadRequest checking {channel['name']}: {e}")
+            not_joined.append(channel)
+            
+        except Forbidden as e:
+            logger.error(f"Bot not admin in {channel['name']}: {e}")
+            not_joined.append(channel)
+            
+        except Exception as e:
+            logger.error(f"Error checking channel {channel['name']}: {e}")
+            not_joined.append(channel)
+            
+    return len(not_joined) == 0, not_joined
+
+async def send_password_reset(target: str):
+    """Send password reset request to Instagram"""
+    try:
+        if '@' in target:
+            data = {
+                '_csrftoken': ''.join(random.choices(string.ascii_letters + string.digits, k=32)),
+                'user_email': target,
+                'guid': str(uuid.uuid4()),
+                'device_id': str(uuid.uuid4())
+            }
+        else: 
+            data = {
+                '_csrftoken': ''.join(random.choices(string.ascii_letters + string.digits, k=32)),
+                'username': target,
+                'guid': str(uuid.uuid4()),
+                'device_id': str(uuid.uuid4())
+            }
+        
+        headers = {
+            'user-agent': f"Instagram 150.0.0.0.000 Android (29/10; 300dpi; 720x1440; {''.join(random.choices(string.ascii_lowercase + string.digits, k=16))}/{''.join(random.choices(string.ascii_lowercase + string.digits, k=16))}; {''.join(random.choices(string.ascii_lowercase + string.digits, k=16))}; {''.join(random.choices(string.ascii_lowercase + string.digits, k=16))}; en_GB;)"
+        }
+        
+        response = requests.post(
+            'https://i.instagram.com/api/v1/accounts/send_password_reset/',
+            headers=headers,
+            data=data,
+            timeout=30
+        )
+        
+        if 'obfuscated_email' in response.text:
+            return f"✅ *Success!* Password reset link sent for: `{target}`"
+        else:
+            return f"❌ *Failed* for: `{target}`\nError: {response.text}"
+            
+    except Exception as e:
+        return f"❌ *Error* for: `{target}`\nException: {str(e)}"
+
+async def create_subscription_keyboard(not_joined_channels=None):
+    """Create subscription check keyboard"""
+    keyboard = []
+    
+    channels_to_show = not_joined_channels if not_joined_channels else CHANNELS
+    
+    for channel in channels_to_show:
+        keyboard.append([InlineKeyboardButton(
+            f"🔗 Join {channel['name']}", 
+            url=channel['url']
+        )])
+    
+    keyboard.append([InlineKeyboardButton(
+        "✅ I JOINED ALL CHANNELS", 
+        callback_data="check_subscription"
+    )])
+    
+    return InlineKeyboardMarkup(keyboard)
+
+async def send_force_join_message(update: Update, context: ContextTypes.DEFAULT_TYPE, not_joined_channels=None):
+    """Send force join message"""
+    keyboard = await create_subscription_keyboard(not_joined_channels)
+    
+    message_text = """
+🚫 **ACCESS RESTRICTED** 🚫
+
+❗️ **You must join ALL our channels to use Instagram Reset feature!**
+
+📋 **Missing channels:**
+"""
+    
+    if not_joined_channels:
+        for channel in not_joined_channels:
+            message_text += f"• {channel['name']}\n"
+    else:
+        message_text += "• Please join all channels below\n"
+        
+    message_text += """
+🔄 **Steps:**
+1️⃣ Click each "Join" button below
+2️⃣ Join ALL channels/groups  
+3️⃣ Click "I JOINED ALL CHANNELS"
+
+⚠️ **Bot will verify your membership!**
+    """
+    
+    if update.callback_query:
+        await update.callback_query.edit_message_text(
+            message_text,
+            reply_markup=keyboard,
+            parse_mode='Markdown'
+        )
+    else:
+        await update.message.reply_text(
+            message_text,
+            reply_markup=keyboard,
+            parse_mode='Markdown'
+        )
+
+async def insta_reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle Instagram reset in Instagram mode"""
+    user_id = update.effective_user.id
+    
+    # Check subscription
+    subscribed, not_joined = await check_channel_subscription(user_id, context)
+    
+    if not subscribed:
+        await send_force_join_message(update, context, not_joined)
+        return INSTA_MODE
+    
+    # Check if target is provided
+    if not context.args:
+        await update.message.reply_text(
+            "❌ **Usage:** /rst username_or_email\n**Example:** /rst johndoe",
+            parse_mode='Markdown'
+        )
+        return INSTA_MODE
+    
+    target = context.args[0]
+    processing_msg = await update.message.reply_text(
+        f"🔄 **Processing Instagram reset for:** `{target}`", 
+        parse_mode='Markdown'
+    )
+    
+    # Send reset request
+    result = await send_password_reset(target)
+    await processing_msg.edit_text(result, parse_mode='Markdown')
+    return INSTA_MODE
+
+async def insta_bulk_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle bulk Instagram reset"""
+    user_id = update.effective_user.id
+    
+    # Check subscription
+    subscribed, not_joined = await check_channel_subscription(user_id, context)
+    
+    if not subscribed:
+        await send_force_join_message(update, context, not_joined)
+        return INSTA_MODE
+    
+    # Check if targets are provided
+    if not context.args:
+        await update.message.reply_text(
+            "❌ **Usage:** /blk user1 user2 user3...\n**Max 10 accounts per request**",
+            parse_mode='Markdown'
+        )
+        return INSTA_MODE
+    
+    targets = context.args[:10]
+    if len(context.args) > 10:
+        await update.message.reply_text(
+            "⚠️ **Limited to 10 accounts per request**", 
+            parse_mode='Markdown'
+        )
+    
+    processing_msg = await update.message.reply_text(
+        f"🔄 **Processing bulk Instagram reset for {len(targets)} accounts...**", 
+        parse_mode='Markdown'
+    )
+    
+    results = []
+    for i, target in enumerate(targets, 1):
+        result = await send_password_reset(target)
+        results.append(f"{i}. {result}")
+        
+        if i % 3 == 0 or i == len(targets):
+            try:
+                await processing_msg.edit_text(
+                    "\n".join(results), 
+                    parse_mode='Markdown'
+                )
+            except:
+                await update.message.reply_text(
+                    "\n".join(results), 
+                    parse_mode='Markdown'
+                )
+                results = []
+        
+        await asyncio.sleep(1)
+    
+    return INSTA_MODE
 
 # =========================
 # Main Menu & Mode Management
@@ -75,16 +299,19 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Create mode selection keyboard
         reply_keyboard = [
             ["💬 Chat Mode", "📷 OCR Mode"],
-            ["🖼️ Screenshot Mode", "❌ Cancel"]
+            ["🖼️ Screenshot Mode", "🔓 Instagram Reset"],
+            ["❌ Cancel"]
         ]
         
         welcome_message = (
             f"👋 Hello {user.first_name}!\n\n"
-            "🤖 I'm your Gemini 2.5 Flash powered AI assistant\n\n"
+            "🤖 **Multi-Feature AI Assistant**\n\n"
+            "✨ **Now with INSTAGRAM RESET FEATURE!** ✨\n\n"
             "🔘 **Select a mode to start:**\n"
-            "• 💬 **Chat Mode** - AI conversations\n"
+            "• 💬 **Chat Mode** - AI conversations with Gemini 2.5 Flash\n"
             "• 📷 **OCR Mode** - Extract text from images\n"
-            "• 🖼️ **Screenshot Mode** - Analyze screenshots\n\n"
+            "• 🖼️ **Screenshot Mode** - Analyze screenshots\n"
+            "• 🔓 **Instagram Reset** - NEW! Password recovery tool\n\n"
             "Once in a mode, just send messages/images normally!\n\n"
             "Credits: @AADI_IO"
         )
@@ -114,6 +341,8 @@ async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await switch_to_ocr_mode(update, context)
     elif text == "🖼️ Screenshot Mode":
         return await switch_to_sshot_mode(update, context)
+    elif text == "🔓 Instagram Reset":
+        return await switch_to_insta_mode(update, context)
     elif text == "❌ Cancel":
         return await cancel_command(update, context)
     else:
@@ -160,6 +389,38 @@ async def switch_to_sshot_mode(update: Update, context: ContextTypes.DEFAULT_TYP
         return SSHOT_MODE
     except Exception as e:
         logger.error(f"Error switching to screenshot mode: {e}")
+        return MAIN_MENU
+
+async def switch_to_insta_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Switch to Instagram reset mode"""
+    try:
+        user_id = update.effective_user.id
+        
+        # Check subscription status first
+        subscribed, not_joined = await check_channel_subscription(user_id, context)
+        
+        if not subscribed:
+            await send_force_join_message(update, context, not_joined)
+            return INSTA_MODE
+        
+        await update.message.reply_text(
+            "🔓 **Switched to Instagram Reset Mode**\n\n"
+            "✨ **INSTAGRAM PASSWORD RECOVERY TOOL** ✨\n\n"
+            "🔑 **Available Commands:**\n"
+            "• /rst username - Single account reset\n"
+            "• /blk user1 user2 - Bulk reset (max 10)\n"
+            "• /mode - Return to mode selection\n\n"
+            "📝 **Examples:**\n"
+            "/rst johndoe\n"
+            "/rst johndoe@gmail.com\n"
+            "/blk user1 user2 user3\n\n"
+            "Credits: @AADI_IO",
+            reply_markup=ReplyKeyboardRemove(),
+            parse_mode='Markdown'
+        )
+        return INSTA_MODE
+    except Exception as e:
+        logger.error(f"Error switching to Instagram mode: {e}")
         return MAIN_MENU
 
 async def mode_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -373,45 +634,130 @@ async def sshot_mode_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return SSHOT_MODE
 
 # =========================
+# Instagram Mode Handlers
+# =========================
+
+async def insta_mode_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle messages in Instagram mode"""
+    message_text = update.message.text
+    
+    # Ignore command messages in Instagram mode
+    if message_text.startswith('/'):
+        await update.message.reply_text(
+            "Use /rst or /blk commands for Instagram reset, or /mode to switch modes."
+        )
+        return INSTA_MODE
+    
+    # Show Instagram mode help
+    help_text = """
+🔓 **Instagram Reset Mode Active**
+
+🔑 **Available Commands:**
+• /rst username - Single account reset
+• /blk user1 user2 - Bulk reset (max 10 accounts)
+
+📝 **Examples:**
+/rst johndoe
+/rst johndoe@gmail.com  
+/blk user1 user2 user3
+
+💡 **Tips:**
+• Use username or email
+• Works for both public and private accounts
+• High success rate
+
+Use /mode to return to main menu.
+    """
+    await update.message.reply_text(help_text, parse_mode='Markdown')
+    return INSTA_MODE
+
+# =========================
+# Callback Handlers
+# =========================
+
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle button callbacks for channel subscription"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    
+    if query.data == "check_subscription":
+        # Re-check subscription
+        subscribed, not_joined = await check_channel_subscription(user_id, context)
+        
+        if subscribed:
+            await query.edit_message_text(
+                "✅ **Verification Successful!** 🎉\n\n"
+                "🔓 **You can now use Instagram Reset features!**\n\n"
+                "Use /rst for single account reset\n"
+                "Use /blk for bulk reset\n"
+                "Use /mode to return to main menu",
+                parse_mode='Markdown'
+            )
+        else:
+            await send_force_join_message(update, context, not_joined)
+
+# =========================
 # Help & About Commands
 # =========================
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /help command"""
-    help_text = (
-        "🤖 **Available Commands:**\n\n"
-        "/start - Start the bot and select mode\n"
-        "/mode - Return to mode selection\n"
-        "/newchat - Reset conversation history (in chat mode)\n"
-        "/cancel - End conversation\n\n"
-        
-        "🔘 **Modes:**\n"
-        "• 💬 **Chat Mode** - Normal AI conversations\n"
-        "• 📷 **OCR Mode** - Extract text from images\n"
-        "• 🖼️ **Screenshot Mode** - Analyze screenshots\n\n"
-        
-        "**Usage:** Select a mode, then interact normally!\n\n"
-        "Credits: @AADI_IO"
-    )
+    help_text = """
+🤖 **Multi-Feature AI Assistant - Complete Help Guide**
+
+🔘 **Available Modes:**
+• 💬 **Chat Mode** - AI conversations with Gemini 2.5 Flash
+• 📷 **OCR Mode** - Extract text from images  
+• 🖼️ **Screenshot Mode** - Analyze screenshots & provide solutions
+• 🔓 **Instagram Reset** - Password recovery tool (requires channel join)
+
+🔑 **Instagram Reset Commands:**
+/rst username - Single account reset
+/blk user1 user2 - Bulk reset (max 10)
+
+🔄 **General Commands:**
+/start - Start bot and select mode
+/mode - Return to mode selection  
+/newchat - Reset conversation history (in chat mode)
+/cancel - End conversation
+
+📝 **Usage:** Select a mode, then interact normally!
+
+✨ **Now featuring INSTAGRAM RESET - Join channels to access!**
+
+Credits: @AADI_IO
+    """
     await update.message.reply_text(help_text)
 
 async def about_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /about command"""
-    about_text = (
-        "🤖 **About This Bot**\n\n"
-        "**Developer:** @AADI_IO\n\n"
-        "**Core Technologies:**\n"
-        "• Telegram Bot API\n"
-        "• Google Gemini 2.5 Flash AI\n"
-        "• FastAPI Web Framework\n"
-        "• Python\n\n"
-        "**Features:**\n"
-        "• Mode-based conversations\n"
-        "• AI-powered chat\n"
-        "• Image text extraction (OCR)\n"
-        "• Screenshot analysis\n\n"
-        "Credits: @AADI_IO"
-    )
+    about_text = """
+🤖 **About This Multi-Feature Bot**
+
+**Developer:** @AADI_IO
+
+**Core Technologies:**
+• Telegram Bot API
+• Google Gemini 2.5 Flash AI
+• FastAPI Web Framework
+• Python
+
+**✨ Featured Capabilities:**
+• AI-powered conversations
+• Image text extraction (OCR)
+• Screenshot analysis & troubleshooting
+• **NEW: Instagram Password Recovery**
+
+**Instagram Reset Feature:**
+• High success rate password recovery
+• Bulk account support
+• Advanced reset methods
+• Channel-verified access
+
+Credits: @AADI_IO
+    """
     await update.message.reply_text(about_text)
 
 # =========================
@@ -441,6 +787,8 @@ async def setup_commands(app: Application):
             BotCommand("start", "Start bot and select mode"),
             BotCommand("mode", "Return to mode selection"),
             BotCommand("newchat", "Reset conversation history"),
+            BotCommand("rst", "Instagram single account reset"),
+            BotCommand("blk", "Instagram bulk reset (max 10)"),
             BotCommand("help", "Get help guide"),
             BotCommand("about", "About this bot"),
             BotCommand("cancel", "End conversation"),
@@ -503,6 +851,11 @@ async def initialize_bot():
                 SSHOT_MODE: [
                     MessageHandler(filters.PHOTO, sshot_mode_handler),
                 ],
+                INSTA_MODE: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, insta_mode_handler),
+                    CommandHandler("rst", insta_reset_command),
+                    CommandHandler("blk", insta_bulk_command),
+                ],
             },
             fallbacks=[
                 CommandHandler("mode", mode_command),
@@ -514,6 +867,9 @@ async def initialize_bot():
         
         # Add conversation handler
         application.add_handler(conv_handler)
+        
+        # Add callback handler for Instagram reset
+        application.add_handler(CallbackQueryHandler(button_callback))
         
         # Add global command handlers
         application.add_handler(CommandHandler("help", help_command))
