@@ -22,6 +22,7 @@ from fastapi.responses import JSONResponse
 import uvicorn
 from PIL import Image
 import io
+import time
 
 # Configure logging
 logging.basicConfig(
@@ -68,59 +69,112 @@ except Exception as e:
     model = genai.GenerativeModel('gemini-1.5-flash')
 
 # =========================
-# Instagram Reset Bot Feature
+# Instagram Reset Bot Feature - FIXED VERSION
 # =========================
 
 async def send_password_reset(target: str):
-    """Send password reset request to Instagram"""
+    """Send password reset request to Instagram with improved reliability"""
     try:
+        # Improved Instagram reset implementation
         if '@' in target:
+            # Email-based reset
             data = {
-                '_csrftoken': ''.join(random.choices(string.ascii_letters + string.digits, k=32)),
-                'user_email': target,
-                'guid': str(uuid.uuid4()),
-                'device_id': str(uuid.uuid4())
+                'email_or_username': target,
+                'recaptcha_response': ''
             }
+            endpoint = 'https://www.instagram.com/accounts/account_recovery_send_ajax/'
         else: 
+            # Username-based reset
             data = {
-                '_csrftoken': ''.join(random.choices(string.ascii_letters + string.digits, k=32)),
-                'username': target,
-                'guid': str(uuid.uuid4()),
-                'device_id': str(uuid.uuid4())
+                'username_or_email': target,
+                'recaptcha_response': ''
             }
+            endpoint = 'https://www.instagram.com/accounts/account_recovery_send_ajax/'
         
+        # More realistic headers
         headers = {
-            'user-agent': f"Instagram 150.0.0.0.000 Android (29/10; 300dpi; 720x1440; {''.join(random.choices(string.ascii_lowercase + string.digits, k=16))}/{''.join(random.choices(string.ascii_lowercase + string.digits, k=16))}; {''.join(random.choices(string.ascii_lowercase + string.digits, k=16))}; {''.join(random.choices(string.ascii_lowercase + string.digits, k=16))}; en_GB;)"
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': '*/*',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'X-Requested-With': 'XMLHttpRequest',
+            'X-IG-App-ID': '936619743392459',
+            'Origin': 'https://www.instagram.com',
+            'Referer': 'https://www.instagram.com/accounts/password/reset/',
+            'Connection': 'keep-alive',
+            'Sec-Fetch-Dest': 'empty',
+            'Sec-Fetch-Mode': 'cors',
+            'Sec-Fetch-Site': 'same-origin'
         }
         
-        response = requests.post(
-            'https://i.instagram.com/api/v1/accounts/send_password_reset/',
+        logger.info(f"Attempting Instagram reset for: {target}")
+        
+        # Use session for better handling
+        session = requests.Session()
+        
+        # First, get the CSRF token
+        csrf_response = session.get('https://www.instagram.com/accounts/password/reset/')
+        csrf_token = None
+        
+        if 'csrftoken' in session.cookies:
+            csrf_token = session.cookies['csrftoken']
+            headers['X-CSRFToken'] = csrf_token
+            data['csrfmiddlewaretoken'] = csrf_token
+        
+        # Send the reset request
+        response = session.post(
+            endpoint,
             headers=headers,
             data=data,
             timeout=30
         )
         
-        if 'obfuscated_email' in response.text:
-            return f"✅ *Success!* Password reset link sent for: `{target}`"
+        logger.info(f"Instagram API Response Status: {response.status_code}")
+        logger.info(f"Instagram API Response: {response.text}")
+        
+        # Check response
+        if response.status_code == 200:
+            response_data = response.json()
+            if response_data.get('status') == 'ok':
+                return f"✅ *Success!* Password reset email sent for: `{target}`"
+            elif 'Please wait a few minutes' in response.text:
+                return f"⏳ *Rate Limited.* Please wait before trying again: `{target}`"
+            else:
+                return f"❌ *Failed* for: `{target}`\nResponse: {response.text}"
         else:
-            return f"❌ *Failed* for: `{target}`\nError: {response.text}"
+            return f"❌ *HTTP Error {response.status_code}* for: `{target}`"
             
+    except requests.exceptions.Timeout:
+        return f"❌ *Timeout Error* for: `{target}` - Instagram server took too long to respond"
+    except requests.exceptions.ConnectionError:
+        return f"❌ *Connection Error* for: `{target}` - Could not reach Instagram servers"
     except Exception as e:
-        return f"❌ *Error* for: `{target}`\nException: {str(e)}"
+        logger.error(f"Unexpected error in Instagram reset: {e}")
+        return f"❌ *Unexpected Error* for: `{target}`\nError: {str(e)}"
 
 async def insta_reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle Instagram reset in Instagram mode"""
     # Check if target is provided
     if not context.args:
         await update.message.reply_text(
-            "❌ **Usage:** /rst username_or_email\n**Example:** /rst johndoe",
+            "❌ **Usage:** /rst username_or_email\n**Example:** /rst johndoe\n**Example:** /rst johndoe@gmail.com",
             parse_mode='Markdown'
         )
         return INSTA_MODE
     
     target = context.args[0]
+    
+    # Validate input
+    if len(target) < 3:
+        await update.message.reply_text(
+            "❌ **Invalid input.** Please provide a valid username or email address (at least 3 characters).",
+            parse_mode='Markdown'
+        )
+        return INSTA_MODE
+    
     processing_msg = await update.message.reply_text(
-        f"🔄 **Processing Instagram reset for:** `{target}`", 
+        f"🔄 **Processing Instagram reset for:** `{target}`\n\nThis may take a few seconds...", 
         parse_mode='Markdown'
     )
     
@@ -130,47 +184,50 @@ async def insta_reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     return INSTA_MODE
 
 async def insta_bulk_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle bulk Instagram reset"""
+    """Handle bulk Instagram reset with improved reliability"""
     # Check if targets are provided
     if not context.args:
         await update.message.reply_text(
-            "❌ **Usage:** /blk user1 user2 user3...\n**Max 10 accounts per request**",
+            "❌ **Usage:** /blk user1 user2 user3...\n**Max 5 accounts per request**",
             parse_mode='Markdown'
         )
         return INSTA_MODE
     
-    targets = context.args[:10]
-    if len(context.args) > 10:
+    targets = context.args[:5]  # Reduced to 5 for better reliability
+    if len(context.args) > 5:
         await update.message.reply_text(
-            "⚠️ **Limited to 10 accounts per request**", 
+            "⚠️ **Limited to 5 accounts per request for better reliability**", 
             parse_mode='Markdown'
         )
     
     processing_msg = await update.message.reply_text(
-        f"🔄 **Processing bulk Instagram reset for {len(targets)} accounts...**", 
+        f"🔄 **Processing bulk Instagram reset for {len(targets)} accounts...**\n\nThis may take a while...", 
         parse_mode='Markdown'
     )
     
     results = []
     for i, target in enumerate(targets, 1):
+        # Add delay between requests to avoid rate limiting
+        if i > 1:
+            await asyncio.sleep(3)
+            
         result = await send_password_reset(target)
         results.append(f"{i}. {result}")
         
-        if i % 3 == 0 or i == len(targets):
-            try:
-                await processing_msg.edit_text(
-                    "\n".join(results), 
-                    parse_mode='Markdown'
-                )
-            except:
-                await update.message.reply_text(
-                    "\n".join(results), 
-                    parse_mode='Markdown'
-                )
-                results = []
-        
-        await asyncio.sleep(1)
+        # Update progress
+        progress_text = f"🔄 **Progress:** {i}/{len(targets)} accounts processed\n\n" + "\n".join(results[-3:])
+        try:
+            await processing_msg.edit_text(progress_text, parse_mode='Markdown')
+        except:
+            # If message is too long, send a new one
+            await update.message.reply_text(
+                "\n".join(results[-3:]), 
+                parse_mode='Markdown'
+            )
     
+    # Final results
+    final_text = "📊 **Bulk Reset Results:**\n\n" + "\n".join(results)
+    await processing_msg.edit_text(final_text, parse_mode='Markdown')
     return INSTA_MODE
 
 # =========================
@@ -186,21 +243,21 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_keyboard = [
             ["🔓 Instagram Reset"],
             ["💬 Chat Mode", "📷 OCR Mode"],
-            ["🖼️ Screenshot Mode", "❌ Cancel"]
+            ["🖼️ Screenshot Mode", "ℹ️ Help"]
         ]
         
         welcome_message = (
             f"👋 Hello {user.first_name}!\n\n"
             "🚀 **MULTI-FEATURE BOT** 🚀\n\n"
             "🎯 **MAIN FEATURE: INSTAGRAM PASSWORD RESET** 🔓\n\n"
-            "✨ *No channel joins required! Instant access!* ✨\n\n"
+            "✨ *Now with improved reliability!* ✨\n\n"
             "🔘 **Select a mode to start:**\n"
             "• 🔓 **Instagram Reset** - Password recovery tool\n"
             "• 💬 **Chat Mode** - AI conversations with Gemini 2.5 Flash\n"
             "• 📷 **OCR Mode** - Extract text from images\n"
             "• 🖼️ **Screenshot Mode** - Analyze screenshots\n\n"
-            "Once in a mode, just send messages/images normally!\n\n"
-            "Dev: @aadi_io"
+            "⚡ **Instant Access - No Verification Required!**\n\n"
+            "Credits: @AADI_IO"
         )
         
         await update.message.reply_text(
@@ -230,8 +287,8 @@ async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await switch_to_ocr_mode(update, context)
     elif text == "🖼️ Screenshot Mode":
         return await switch_to_sshot_mode(update, context)
-    elif text == "❌ Cancel":
-        return await cancel_command(update, context)
+    elif text == "ℹ️ Help":
+        return await help_command(update, context)
     else:
         await update.message.reply_text("Please select a mode from the keyboard below:")
         return MAIN_MENU
@@ -242,16 +299,20 @@ async def switch_to_insta_mode(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(
             "🔓 **SWITCHED TO INSTAGRAM RESET MODE** 🔓\n\n"
             "🎯 **INSTAGRAM PASSWORD RECOVERY TOOL** 🎯\n\n"
+            "✨ *Improved reliability with better API handling!*\n\n"
             "🔑 **Available Commands:**\n"
-            "• /rst username - Single account reset\n"
-            "• /blk user1 user2 - Bulk reset (max 10 accounts)\n"
-            "• /mode - Return to mode selection\n\n"
+            "• `/rst username` - Single account reset\n"
+            "• `/rst email@gmail.com` - Reset by email\n"
+            "• `/blk user1 user2` - Bulk reset (max 5 accounts)\n\n"
             "📝 **Examples:**\n"
-            "/rst johndoe\n"
-            "/rst johndoe@gmail.com\n"
-            "/blk user1 user2 user3\n\n"
-            "⚡ **Instant Access - No Verification Required!** ⚡\n\n"
-            "Dev: @aadi_io",
+            "`/rst johndoe`\n"
+            "`/rst johndoe@gmail.com`\n"
+            "`/blk user1 user2 user3`\n\n"
+            "⚡ **Tips for better results:**\n"
+            "• Use valid usernames/emails\n"
+            "• Avoid special characters\n"
+            "• Wait between bulk requests\n\n"
+            "Credits: @AADI_IO",
             reply_markup=ReplyKeyboardRemove(),
             parse_mode='Markdown'
         )
@@ -266,7 +327,7 @@ async def switch_to_chat_mode(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(
             "🔘 **Switched to 💬 Chat Mode**\n\n"
             "Now you can chat with me normally! Just send your messages and I'll respond.\n\n"
-            "Use /mode to return to mode selection or /cancel to exit.",
+            "Use /mode to return to mode selection.",
             reply_markup=ReplyKeyboardRemove()
         )
         return CHAT_MODE
@@ -280,7 +341,7 @@ async def switch_to_ocr_mode(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text(
             "🔘 **Switched to 📷 OCR Mode**\n\n"
             "Now send me images and I'll extract text from them!\n\n"
-            "Use /mode to return to mode selection or /cancel to exit.",
+            "Use /mode to return to mode selection.",
             reply_markup=ReplyKeyboardRemove()
         )
         return OCR_MODE
@@ -294,7 +355,7 @@ async def switch_to_sshot_mode(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(
             "🔘 **Switched to 🖼️ Screenshot Mode**\n\n"
             "Now send me screenshots and I'll analyze them for issues and solutions!\n\n"
-            "Use /mode to return to mode selection or /cancel to exit.",
+            "Use /mode to return to mode selection.",
             reply_markup=ReplyKeyboardRemove()
         )
         return SSHOT_MODE
@@ -310,7 +371,7 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Cancel conversation and return to main menu"""
     try:
         await update.message.reply_text(
-            "Conversation ended. Use /start to begin again.",
+            "Operation cancelled. Use /start to begin again.",
             reply_markup=ReplyKeyboardRemove()
         )
     except Exception as e:
@@ -338,24 +399,27 @@ async def insta_mode_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 🎯 **MAIN FEATURE - INSTAGRAM PASSWORD RECOVERY**
 
+✨ *Improved reliability with better error handling!*
+
 🔑 **Available Commands:**
-• /rst username - Single account reset
-• /blk user1 user2 - Bulk reset (max 10 accounts)
+• `/rst username` - Single account reset
+• `/rst email@gmail.com` - Reset by email  
+• `/blk user1 user2` - Bulk reset (max 5 accounts)
 
 📝 **Examples:**
-/rst johndoe
-/rst johndoe@gmail.com  
-/blk user1 user2 user3
+`/rst johndoe`
+`/rst johndoe@gmail.com`  
+`/blk user1 user2 user3`
 
-💡 **Features:**
-• Instant access - no verification required
-• Works for both public and private accounts
-• High success rate
-• Bulk processing support
+⚡ **Tips for Success:**
+• Use valid usernames/emails
+• Avoid special characters
+• Wait between bulk requests
+• Check your email spam folder
 
-⚡ **Quick Start:** Use /rst username to begin!
+💡 **Note:** This uses Instagram's official recovery system.
 
-Use /mode to return to main menu.
+Use `/mode` to return to main menu.
     """
     await update.message.reply_text(help_text, parse_mode='Markdown')
     return INSTA_MODE
@@ -371,7 +435,7 @@ async def chat_mode_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Ignore command messages in chat mode
     if message_text.startswith('/'):
-        await update.message.reply_text("Use /mode to switch modes or /cancel to exit.")
+        await update.message.reply_text("Use /mode to switch modes.")
         return CHAT_MODE
     
     try:
@@ -398,7 +462,7 @@ async def chat_mode_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Escape any special characters that might cause formatting issues
         safe_response = html.escape(response.text)
-        await update.message.reply_text(f"{safe_response}\n\nDev: @aadi_io")
+        await update.message.reply_text(f"{safe_response}\n\nCredits: @AADI_IO")
         
     except Exception as e:
         logger.error(f"Error in chat mode: {e}")
@@ -417,12 +481,12 @@ async def newchat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_conversations[user_id] = []
             await update.message.reply_text(
                 "🔄 Conversation history cleared! Continuing in chat mode...\n\n"
-                "Dev: @aadi_io"
+                "Credits: @AADI_IO"
             )
         else:
             await update.message.reply_text(
                 "No active chat session to clear. Continuing in chat mode...\n\n"
-                "Dev: @aadi_io"
+                "Credits: @AADI_IO"
             )
     except Exception as e:
         logger.error(f"Error in newchat command: {e}")
@@ -440,7 +504,7 @@ async def ocr_mode_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "📷 **OCR Mode Active**\n\n"
             "Please send an image containing text for extraction.\n\n"
-            "Use /mode to switch modes or /cancel to exit."
+            "Use /mode to switch modes."
         )
         return OCR_MODE
     
@@ -469,13 +533,13 @@ async def ocr_mode_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 f"📝 **Extracted Text:**\n\n{safe_text}\n\n"
                 f"📷 **OCR Mode still active** - send another image or use /mode to switch.\n\n"
-                f"Dev: @aadi_io"
+                f"Credits: @AADI_IO"
             )
         else:
             await update.message.reply_text(
                 "No text could be extracted from the image.\n\n"
                 "📷 **OCR Mode still active** - send another image or use /mode to switch.\n\n"
-                "Dev: @aadi_io"
+                "Credits: @AADI_IO"
             )
             
     except Exception as e:
@@ -483,7 +547,7 @@ async def ocr_mode_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "Sorry, I encountered an error processing the image. Please try again.\n\n"
             "📷 **OCR Mode still active**\n\n"
-            "Dev: @aadi_io"
+            "Credits: @AADI_IO"
         )
     
     return OCR_MODE
@@ -498,7 +562,7 @@ async def sshot_mode_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text(
             "🖼️ **Screenshot Mode Active**\n\n"
             "Please send a screenshot for analysis.\n\n"
-            "Use /mode to switch modes or /cancel to exit."
+            "Use /mode to switch modes."
         )
         return SSHOT_MODE
     
@@ -536,13 +600,13 @@ async def sshot_mode_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await update.message.reply_text(
                 f"🖼️ **Screenshot Analysis:**\n\n{safe_analysis}\n\n"
                 f"🖼️ **Screenshot Mode still active** - send another screenshot or use /mode to switch.\n\n"
-                f"Dev: @aadi_io"
+                f"Credits: @AADI_IO"
             )
         else:
             await update.message.reply_text(
                 "I couldn't generate a detailed analysis for this screenshot. Please try with a clearer image.\n\n"
                 "🖼️ **Screenshot Mode still active** - send another screenshot or use /mode to switch.\n\n"
-                "Dev: @aadi_io"
+                "Credits: @AADI_IO"
             )
             
     except Exception as e:
@@ -550,7 +614,7 @@ async def sshot_mode_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text(
             "Sorry, I encountered an error analyzing the screenshot. Please try again.\n\n"
             "🖼️ **Screenshot Mode still active**\n\n"
-            "Dev: @aadi_io"
+            "Credits: @AADI_IO"
         )
     
     return SSHOT_MODE
@@ -566,6 +630,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 🎯 **MAIN FEATURE: INSTAGRAM PASSWORD RESET** 🔓
 
+✨ *Now with improved reliability and better error handling!*
+
 🔘 **Available Modes:**
 • 🔓 **Instagram Reset** - Password recovery tool (MAIN FEATURE)
 • 💬 **Chat Mode** - AI conversations with Gemini 2.5 Flash
@@ -573,22 +639,22 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • 🖼️ **Screenshot Mode** - Analyze screenshots & provide solutions
 
 🔑 **Instagram Reset Commands:**
-/rst username - Single account reset
-/blk user1 user2 - Bulk reset (max 10)
+`/rst username` - Single account reset
+`/rst email@gmail.com` - Reset by email
+`/blk user1 user2` - Bulk reset (max 5 accounts)
 
 🔄 **General Commands:**
-/start - Start bot and select mode
-/mode - Return to mode selection  
-/newchat - Reset conversation history (in chat mode)
-/cancel - End conversation
+`/start` - Start bot and select mode
+`/mode` - Return to mode selection  
+`/newchat` - Reset conversation history (in chat mode)
 
 ⚡ **Instant Access - No Verification Required!**
 
 📝 **Usage:** Select a mode, then interact normally!
 
-Dev: @aadi_io
+Credits: @AADI_IO
     """
-    await update.message.reply_text(help_text)
+    await update.message.reply_text(help_text, parse_mode='Markdown')
 
 async def about_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /about command"""
@@ -597,13 +663,13 @@ async def about_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 **Developer:** @AADI_IO
 
-**✨ FEATURED CAPABILITIES:**
+✨ **FEATURED CAPABILITIES:**
 
 🎯 **MAIN FEATURE: Instagram Password Recovery**
-• Instant password reset tool
-• Bulk account support (up to 10 accounts)
-• High success rate
-• No channel joins required
+• Improved reliability with better API handling
+• Support for both username and email resets
+• Bulk account support (up to 5 accounts)
+• Enhanced error handling and logging
 
 **Additional Features:**
 • AI-powered conversations with Gemini 2.5 Flash
@@ -618,7 +684,7 @@ async def about_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 ⚡ **Instant Access - No Verification Required!**
 
-Dev: @aadi_io
+Credits: @AADI_IO
     """
     await update.message.reply_text(about_text)
 
@@ -649,11 +715,10 @@ async def setup_commands(app: Application):
             BotCommand("start", "Start bot and select mode"),
             BotCommand("mode", "Return to mode selection"),
             BotCommand("rst", "Instagram single account reset"),
-            BotCommand("blk", "Instagram bulk reset (max 10)"),
+            BotCommand("blk", "Instagram bulk reset (max 5)"),
             BotCommand("newchat", "Reset conversation history"),
             BotCommand("help", "Get help guide"),
             BotCommand("about", "About this bot"),
-            BotCommand("cancel", "End conversation"),
         ]
         await app.bot.set_my_commands(commands)
         logger.info("Bot commands menu set successfully")
@@ -721,8 +786,8 @@ async def initialize_bot():
             },
             fallbacks=[
                 CommandHandler("mode", mode_command),
-                CommandHandler("cancel", cancel_command),
                 CommandHandler("start", start_command),
+                CommandHandler("help", help_command),
             ],
             allow_reentry=True
         )
