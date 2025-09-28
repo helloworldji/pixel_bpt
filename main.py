@@ -50,12 +50,17 @@ application = None
 # Store conversation history
 user_conversations = {}
 
-# Conversation states for OCR
+# Conversation states
 WAITING_FOR_IMAGE = 1
+WAITING_FOR_SCREENSHOT = 2
 
 # Initialize Gemini models
 text_model = genai.GenerativeModel('gemini-pro')
 vision_model = genai.GenerativeModel('gemini-pro-vision')
+
+# =========================
+# Bot Command Handlers
+# =========================
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /start command"""
@@ -63,11 +68,14 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_message = (
         f"👋 Hello {user.first_name}!\n\n"
         "I'm your Gemini-powered AI assistant 🤖\n\n"
-        "You can access all features through the commands - "
-        "use the 'Menu' button to see what I can do!\n\n"
+        "**Available Features:**\n"
+        "• 💬 **/chat** - AI conversation\n"
+        "• 📷 **/ocr** - Extract text from images\n"
+        "• 🖼️ **/sshot** - Analyze screenshots & provide solutions\n\n"
+        "Use the 'Menu' button to see all commands!\n\n"
         "Credits: @AADI_IO"
     )
-    await update.message.reply_text(welcome_message)
+    await update.message.reply_text(welcome_message, parse_mode='Markdown')
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /help command"""
@@ -93,6 +101,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "**/ocr** - Extract text from images\n"
         "_Example: Send /ocr and then send an image_\n\n"
         
+        "**/sshot** - Analyze screenshots and provide solutions\n"
+        "_Example: Send /sshot and then send a screenshot for analysis_\n\n"
+        
         "Credits: @AADI_IO"
     )
     await update.message.reply_text(help_text, parse_mode='Markdown')
@@ -107,9 +118,10 @@ async def about_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Google Gemini AI\n"
         "• FastAPI Web Framework\n"
         "• Python\n\n"
-        "This bot demonstrates the integration of Google's Gemini AI "
-        "with Telegram to provide intelligent conversation and image "
-        "analysis capabilities.\n\n"
+        "**Features:**\n"
+        "• AI-powered conversations\n"
+        "• Image text extraction (OCR)\n"
+        "• Screenshot analysis & troubleshooting\n\n"
         "Credits: @AADI_IO"
     )
     await update.message.reply_text(about_text, parse_mode='Markdown')
@@ -123,7 +135,8 @@ async def chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(message_text.split()) < 2:
         await update.message.reply_text(
             "Please provide a question after the /chat command.\n"
-            "Example: /chat What is artificial intelligence?"
+            "Example: `/chat What is artificial intelligence?`",
+            parse_mode='Markdown'
         )
         return
     
@@ -134,18 +147,18 @@ async def chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if user_id not in user_conversations:
             user_conversations[user_id] = []
         
-        # Add user message to history
-        user_conversations[user_id].append({"role": "user", "parts": [question]})
-        
         # Send "typing" action
         await update.message.chat.send_action(action="typing")
         
-        # Generate response using Gemini
-        chat_session = text_model.start_chat(history=user_conversations[user_id][:-1])
+        # Generate response using Gemini with history
+        chat_session = text_model.start_chat(history=user_conversations[user_id])
         response = chat_session.send_message(question)
         
-        # Add assistant response to history
-        user_conversations[user_id].append({"role": "model", "parts": [response.text]})
+        # Update conversation history
+        user_conversations[user_id].extend([
+            {"role": "user", "parts": [question]},
+            {"role": "model", "parts": [response.text]}
+        ])
         
         # Limit conversation history to prevent excessive memory usage
         if len(user_conversations[user_id]) > 20:  # Keep last 10 exchanges
@@ -156,7 +169,8 @@ async def chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Error in chat command: {e}")
         await update.message.reply_text(
-            "Sorry, I encountered an error processing your request. Please try again."
+            "Sorry, I encountered an error processing your request. Please try again.\n\n"
+            "Credits: @AADI_IO"
         )
 
 async def newchat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -175,11 +189,17 @@ async def newchat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Credits: @AADI_IO"
         )
 
+# =========================
+# OCR Feature Implementation
+# =========================
+
 async def ocr_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start OCR conversation"""
     await update.message.reply_text(
-        "📷 Please send the image you want me to scan for text.\n\n"
-        "To cancel, send /cancel"
+        "📷 **OCR Text Extraction**\n\n"
+        "Please send the image you want me to scan for text.\n\n"
+        "To cancel, send /cancel",
+        parse_mode='Markdown'
     )
     return WAITING_FOR_IMAGE
 
@@ -234,6 +254,89 @@ async def process_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     return ConversationHandler.END
 
+# =========================
+# Screenshot Analysis Feature Implementation
+# =========================
+
+async def sshot_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start screenshot analysis conversation"""
+    await update.message.reply_text(
+        "🖼️ **Screenshot Analysis**\n\n"
+        "Please send the screenshot you want me to analyze.\n\n"
+        "I can help with:\n"
+        "• Error message analysis\n"
+        "• UI/UX feedback\n"
+        "• Technical troubleshooting\n"
+        "• General insights\n\n"
+        "To cancel, send /cancel",
+        parse_mode='Markdown'
+    )
+    return WAITING_FOR_SCREENSHOT
+
+async def sshot_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cancel screenshot analysis conversation"""
+    await update.message.reply_text("Screenshot analysis cancelled.")
+    return ConversationHandler.END
+
+async def analyze_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Analyze screenshot and provide solutions"""
+    if not update.message.photo:
+        await update.message.reply_text(
+            "Please send a screenshot image. To cancel, send /cancel"
+        )
+        return WAITING_FOR_SCREENSHOT
+    
+    try:
+        # Send "typing" action
+        await update.message.chat.send_action(action="typing")
+        
+        # Get the highest quality photo
+        photo_file = await update.message.photo[-1].get_file()
+        photo_bytes = await photo_file.download_as_bytearray()
+        
+        # Convert to PIL Image
+        image = Image.open(io.BytesIO(photo_bytes))
+        
+        # Analyze with Gemini Vision - comprehensive prompt for screenshot analysis
+        analysis_prompt = """
+        Analyze this screenshot and provide:
+
+        1. **Overview**: What appears to be happening in this screenshot?
+        2. **Key Elements**: What are the main UI components, text, or error messages visible?
+        3. **Issues Identified**: If there are any problems, errors, or areas of concern, list them clearly.
+        4. **Solutions/Recommendations**: Provide step-by-step solutions or recommendations to fix any identified issues.
+        5. **Best Practices**: If applicable, suggest best practices to prevent similar issues.
+
+        Be specific, practical, and helpful. Focus on actionable advice.
+        """
+        
+        response = vision_model.generate_content([analysis_prompt, image])
+        
+        analysis_text = response.text.strip()
+        
+        if analysis_text:
+            await update.message.reply_text(
+                f"🖼️ **Screenshot Analysis**\n\n{analysis_text}\n\nCredits: @AADI_IO",
+                parse_mode='Markdown'
+            )
+        else:
+            await update.message.reply_text(
+                "I couldn't generate a detailed analysis for this screenshot. Please try with a clearer image.\n\nCredits: @AADI_IO"
+            )
+            
+    except Exception as e:
+        logger.error(f"Error in screenshot analysis: {e}")
+        await update.message.reply_text(
+            "Sorry, I encountered an error analyzing the screenshot. Please try again.\n\n"
+            "Credits: @AADI_IO"
+        )
+    
+    return ConversationHandler.END
+
+# =========================
+# Bot Setup & Webhook Configuration
+# =========================
+
 async def setup_commands(app: Application):
     """Setup bot commands menu"""
     commands = [
@@ -243,6 +346,7 @@ async def setup_commands(app: Application):
         BotCommand("chat", "Chat with Gemini AI"),
         BotCommand("newchat", "Reset conversation"),
         BotCommand("ocr", "Extract text from images"),
+        BotCommand("sshot", "Analyze screenshots"),
     ]
     await app.bot.set_my_commands(commands)
 
@@ -292,6 +396,18 @@ async def initialize_bot():
             fallbacks=[CommandHandler("cancel", ocr_cancel)],
         )
         
+        # Screenshot Analysis Conversation Handler
+        sshot_handler = ConversationHandler(
+            entry_points=[CommandHandler("sshot", sshot_start)],
+            states={
+                WAITING_FOR_SCREENSHOT: [
+                    MessageHandler(filters.PHOTO, analyze_screenshot),
+                    CommandHandler("cancel", sshot_cancel)
+                ],
+            },
+            fallbacks=[CommandHandler("cancel", sshot_cancel)],
+        )
+        
         # Regular command handlers
         application.add_handler(CommandHandler("start", start_command))
         application.add_handler(CommandHandler("help", help_command))
@@ -299,8 +415,9 @@ async def initialize_bot():
         application.add_handler(CommandHandler("chat", chat_command))
         application.add_handler(CommandHandler("newchat", newchat_command))
         application.add_handler(ocr_handler)
+        application.add_handler(sshot_handler)
         
-        # Initialize the application
+        # CRITICAL FIX: Initialize the application properly
         await application.initialize()
         await application.start()
         logger.info("Telegram application initialized and started")
@@ -320,6 +437,10 @@ async def initialize_bot():
         if application:
             await application.stop()
         raise
+
+# =========================
+# FastAPI Routes & Server Setup
+# =========================
 
 @app.on_event("startup")
 async def startup_event():
@@ -355,7 +476,7 @@ async def webhook_endpoint(token: str, request: Request):
         logger.warning(f"Invalid token received: {token}")
         return JSONResponse(
             content={"status": "invalid token"},
-            status_code=status.HTTP_401_UNAUTHORIZED
+            status_code=status.HTTP_401_UNANAUTHORIZED
         )
     
     if not application:
