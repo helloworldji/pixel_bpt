@@ -1,6 +1,7 @@
 import os
 import logging
 import google.generativeai as genai
+import time
 from telegram import Update, File, BotCommand
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
 from PIL import Image
@@ -159,16 +160,32 @@ def main() -> None:
     """Start the bot using webhooks."""
     logger.info("Starting bot in webhook mode...")
     
-    # Get webhook URL from environment just before it's needed.
+    # Get webhook URL from environment, with retries to handle startup timing issues on Render.
     WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+    retries = 8 # Retry for up to 40 seconds
+    while not WEBHOOK_URL and retries > 0:
+        logger.warning(f"WEBHOOK_URL not found. Retrying in 5 seconds... ({retries} retries left)")
+        time.sleep(5)
+        WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+        retries -= 1
+
     if not WEBHOOK_URL:
-        logger.error("WEBHOOK_URL environment variable not found!")
+        logger.error("WEBHOOK_URL environment variable not found after several retries! Exiting.")
         return # Exit if the URL isn't set, as webhook mode is impossible.
+    
+    logger.info(f"Successfully found WEBHOOK_URL: {WEBHOOK_URL}")
 
     # Render provides the port to listen on in the PORT environment variable. Default to 8080 for local testing.
     PORT = int(os.environ.get('PORT', '8080'))
 
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
+    # Add a health_check_endpoint to respond to Render's health checks.
+    application = (
+        Application.builder()
+        .token(TELEGRAM_BOT_TOKEN)
+        .post_init(post_init)
+        .health_check_endpoint("/")
+        .build()
+    )
 
     # Conversation handler for the OCR feature
     ocr_conv_handler = ConversationHandler(
