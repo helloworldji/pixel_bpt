@@ -1,47 +1,61 @@
 import os
 import logging
+import asyncio
 import google.generativeai as genai
-import time
 from telegram import Update, File, BotCommand
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    filters,
+    ContextTypes,
+    ConversationHandler,
+)
 from PIL import Image
 import io
 
-# --- Basic Setup ---
+# --- 1. Basic Setup & Configuration ---
+
+# Configure logging to see events and errors
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# --- API Configuration ---
+# Get API keys from environment variables. The script will exit if they are not found.
 try:
-    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
     TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-    # We will get WEBHOOK_URL later inside the main function to avoid startup race conditions.
+    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+    # Configure the Gemini API client
     genai.configure(api_key=GEMINI_API_KEY)
-except TypeError:
-    logger.error("API keys not found. Please set GEMINI_API_KEY and TELEGRAM_BOT_TOKEN as environment variables.")
+except (TypeError, ValueError):
+    logger.error("FATAL: GEMINI_API_KEY and TELEGRAM_BOT_TOKEN must be set in environment variables.")
     exit()
 
-# --- Gemini Model Initialization ---
-text_model = genai.GenerativeModel('gemini-pro')
-vision_model = genai.GenerativeModel('gemini-pro-vision')
+# --- 2. AI Model Initialization ---
+try:
+    text_model = genai.GenerativeModel('gemini-pro')
+    vision_model = genai.GenerativeModel('gemini-pro-vision')
+except Exception as e:
+    logger.error(f"FATAL: Could not initialize Gemini models: {e}")
+    exit()
 
-# --- Conversation States ---
+# --- 3. Conversation Handler States ---
+# Define a state for the OCR conversation flow to know when we are waiting for an image
 WAITING_FOR_IMAGE = 1
 
-# --- Bot Command Handlers ---
+# --- 4. Bot Command Handlers ---
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Sends a welcome message when the /start command is issued."""
+    """Greets the user and explains the bot's purpose."""
     user_name = update.effective_user.first_name
     welcome_message = (
         f"👋 **Hello {user_name}!**\n\n"
-        "Welcome to your multi-functional AI assistant!\n\n"
-        "I have distinct features, each with its own command. "
-        "This makes it easy for you to tell me exactly what you need.\n\n"
-        "Click the 'Menu' button or type /help to see all the commands and get started!\n\n"
+        "I am an AI assistant powered by Google Gemini.\n\n"
+        "I have several features, each triggered by a specific command. "
+        "This makes it easy for you to get exactly what you need.\n\n"
+        "👉 Click the **Menu** button below (or type `/`) to see all available commands and get started!\n\n"
         "**Credits:** @AADI_IO"
     )
     await update.message.reply_text(welcome_message, parse_mode='Markdown')
@@ -49,48 +63,46 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Provides a detailed guide on how to use the bot's commands."""
     help_text = (
-        "**How to Use This Bot**\n\n"
-        "Here are the available commands:\n\n"
+        "**📖 How to Use This Bot**\n\n"
+        "Here is a list of all my commands:\n\n"
         "🤖 **/chat [your question]**\n"
-        "Use this command to have a conversation with the AI. "
-        "Simply type your question or message after the command.\n"
-        "*Example:* `/chat What is the capital of India?`\n\n"
+        "Engage in a conversation. Just type your question after the command.\n"
+        "  *Example:* `/chat What are the best places to visit in India?`\n\n"
         "📄 **/ocr**\n"
-        "Use this command to extract text from an image (Optical Character Recognition). "
-        "After sending this command, I will ask you to send the image.\n\n"
+        "Extract text from an image. After sending this command, I will prompt you to send the photo.\n\n"
         "🔄 **/newchat**\n"
-        "Starts a fresh, new conversation with the AI, clearing any previous context.\n\n"
+        "Clears our previous conversation history, allowing us to start fresh.\n\n"
         "ℹ️ **/about**\n"
-        "Displays information about the bot, its developer, and the technology it uses."
+        "Displays information about me, my developer, and the technology I use."
     )
     await update.message.reply_text(help_text, parse_mode='Markdown')
 
 async def about_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Sends information about the bot."""
+    """Shows information about the bot."""
     about_text = (
-        "**About This Bot**\n\n"
-        "This bot leverages the power of Google's Gemini API to provide advanced AI capabilities directly within Telegram.\n\n"
+        "**ℹ️ About This Bot**\n\n"
+        "This bot uses Google's powerful Gemini API to bring advanced AI features to your Telegram chat.\n\n"
         "**Developer:** @AADI_IO\n"
-        "**Technology:** Python, python-telegram-bot, Google Gemini"
+        "**Technology:** Python, `python-telegram-bot`, Google Gemini"
     )
     await update.message.reply_text(about_text, parse_mode='Markdown')
 
 async def newchat_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Clears the user's conversation history."""
+    """Clears the user's conversation history for the chat model."""
     if 'chat_session' in context.user_data:
         del context.user_data['chat_session']
     await update.message.reply_text("✅ Conversation history cleared. Let's start a fresh chat!")
 
-# --- Feature Handlers ---
+# --- 5. Feature Logic Handlers ---
 
 async def chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles the /chat command and generates a response."""
+    """Handles the /chat command and generates a text response."""
     user_message = " ".join(context.args)
     if not user_message:
-        await update.message.reply_text("Please ask a question after the /chat command.\n*Example:* `/chat Who are you?`", parse_mode='Markdown')
+        await update.message.reply_text("Please provide a question after the `/chat` command.\n*Example:* `/chat Who are you?`", parse_mode='Markdown')
         return
 
-    logger.info(f"Chat query from {update.effective_user.first_name}: {user_message}")
+    logger.info(f"Chat query from {update.effective_user.first_name}")
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action='typing')
 
     try:
@@ -98,22 +110,23 @@ async def chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             context.user_data['chat_session'] = text_model.start_chat(history=[])
         
         chat = context.user_data['chat_session']
-        response = chat.send_message(user_message)
+        # Run the synchronous Gemini SDK call in a separate thread to avoid blocking
+        response = await asyncio.to_thread(chat.send_message, user_message)
         
         await update.message.reply_text(response.text)
     except Exception as e:
         logger.error(f"Error in chat_handler: {e}")
-        await update.message.reply_text("Sorry, an error occurred. Please try starting a /newchat.")
+        await update.message.reply_text("Sorry, an error occurred while processing your request. Please try starting a `/newchat`.")
 
-async def ocr_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Asks the user to send an image for OCR."""
-    await update.message.reply_text("Please send the image you want me to scan for text.")
+async def ocr_start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Starts the OCR process by asking for an image."""
+    await update.message.reply_text("Please send the image you want me to scan for text. To cancel, send /cancel.")
     return WAITING_FOR_IMAGE
 
-async def handle_ocr_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def ocr_image_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Processes the image sent for OCR."""
     logger.info(f"Received image for OCR from {update.effective_user.first_name}")
-    await update.message.reply_text("⏳ Processing your image, please wait...")
+    await update.message.reply_text("⏳ Processing your image, this may take a moment...")
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action='typing')
 
     try:
@@ -122,30 +135,40 @@ async def handle_ocr_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         img = Image.open(io.BytesIO(file_bytes))
 
         prompt = "Extract all text from this image. Present it clearly and accurately."
-        response = vision_model.generate_content([prompt, img])
+        # Run the synchronous Gemini SDK call in a separate thread
+        response = await asyncio.to_thread(vision_model.generate_content, [prompt, img])
 
         final_response = (
             f"✅ **Text Extracted:**\n\n---\n\n{response.text}\n\n---\n\n"
-            "Credits: @AADI_IO"
+            "**Credits:** @AADI_IO"
         )
         await update.message.reply_text(final_response, parse_mode='Markdown')
     except Exception as e:
-        logger.error(f"Error in handle_ocr_image: {e}")
-        await update.message.reply_text("Sorry, I couldn't process that image. Please ensure it's a clear photo and try the /ocr command again.")
+        logger.error(f"Error in ocr_image_handler: {e}")
+        await update.message.reply_text("Sorry, I couldn't process that image. Please try the `/ocr` command again.")
     
     return ConversationHandler.END
 
-async def cancel_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Cancels the current operation, like waiting for an image."""
+async def ocr_cancel_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Cancels the OCR operation if the user sends /cancel."""
     await update.message.reply_text('Operation cancelled.')
     return ConversationHandler.END
 
+# --- 6. Error Handling & General Messages ---
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Log Errors caused by Updates."""
-    logger.warning('Update "%s" caused error "%s"', update, context.error)
+    """Logs any errors that the bot encounters."""
+    logger.error('Update "%s" caused error "%s"', update, context.error)
+
+async def guide_user_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles any text message that isn't a command, guiding the user on how to interact."""
+    await update.message.reply_text("Please use a command to interact with me. Click the 'Menu' button or type /help to see what I can do!")
+
+# --- 7. Main Application Setup & Execution ---
 
 async def post_init(application: Application) -> None:
-    """Sets the bot commands after initialization."""
+    """This function is called after the bot is initialized to set the command menu."""
+    logger.info("Setting up bot commands...")
     commands = [
         BotCommand("start", "▶️ Welcome & Intro"),
         BotCommand("help", "❓ How to use the bot"),
@@ -154,67 +177,59 @@ async def post_init(application: Application) -> None:
         BotCommand("newchat", "🔄 Start a new conversation"),
     ]
     await application.bot.set_my_commands(commands)
-    # The webhook is now set in the main() function by run_webhook, so we remove it from here.
+    logger.info("Bot commands set successfully.")
 
-def main() -> None:
-    """Start the bot using webhooks."""
-    logger.info("Starting bot in webhook mode...")
-    
-    # Get webhook URL from environment, with retries to handle startup timing issues on Render.
+async def main() -> None:
+    """The main function to set up and run the bot."""
+    PORT = int(os.environ.get('PORT', '8080'))
+
+    # This is the crucial part for Render deployment. We need the public URL
+    # from the WEBHOOK_URL env var, which isn't available immediately.
+    # We will retry asynchronously while the health check server runs.
+    logger.info("Attempting to find WEBHOOK_URL from environment...")
     WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-    retries = 8 # Retry for up to 40 seconds
+    retries = 10
     while not WEBHOOK_URL and retries > 0:
-        logger.warning(f"WEBHOOK_URL not found. Retrying in 5 seconds... ({retries} retries left)")
-        time.sleep(5)
+        logger.warning(f"WEBHOOK_URL not found. Retrying in 5 seconds... ({retries} left)")
+        await asyncio.sleep(5) # Non-blocking sleep allows health checks to pass
         WEBHOOK_URL = os.getenv("WEBHOOK_URL")
         retries -= 1
 
     if not WEBHOOK_URL:
-        logger.error("WEBHOOK_URL environment variable not found after several retries! Exiting.")
-        return # Exit if the URL isn't set, as webhook mode is impossible.
-    
+        logger.error("FATAL: WEBHOOK_URL not found after multiple retries. Cannot start in webhook mode.")
+        return
+
     logger.info(f"Successfully found WEBHOOK_URL: {WEBHOOK_URL}")
 
-    # Render provides the port to listen on in the PORT environment variable. Default to 8080 for local testing.
-    PORT = int(os.environ.get('PORT', '8080'))
-
-    # Add a health_check_endpoint to respond to Render's health checks.
+    # Build the application
     application = (
         Application.builder()
         .token(TELEGRAM_BOT_TOKEN)
         .post_init(post_init)
-        .health_check_endpoint("/")
+        .health_check_endpoint("/") # Responds to Render's health checks
         .build()
     )
 
-    # Conversation handler for the OCR feature
+    # Define the conversation handler for the multi-step OCR process
     ocr_conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("ocr", ocr_command_handler)],
-        states={
-            WAITING_FOR_IMAGE: [MessageHandler(filters.PHOTO, handle_ocr_image)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel_handler)],
+        entry_points=[CommandHandler("ocr", ocr_start_handler)],
+        states={ WAITING_FOR_IMAGE: [MessageHandler(filters.PHOTO, ocr_image_handler)] },
+        fallbacks=[CommandHandler("cancel", ocr_cancel_handler)],
     )
 
-    # --- Register all handlers here ---
+    # Register all handlers
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("about", about_command))
     application.add_handler(CommandHandler("newchat", newchat_command))
     application.add_handler(CommandHandler("chat", chat_handler))
     application.add_handler(ocr_conv_handler)
-    
-    # A generic message handler to guide users who just type text
-    async def guide_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.message.reply_text("Please use a command to interact with me. Type /help to see what I can do!")
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, guide_user))
-
-    # Add the error handler
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, guide_user_handler))
     application.add_error_handler(error_handler)
 
-    # Start the Bot with a webhook.
-    # The run_webhook function will also automatically set the webhook on Telegram servers.
-    application.run_webhook(
+    # Start the bot in webhook mode
+    logger.info(f"Starting webhook server on port {PORT}...")
+    await application.run_webhook(
         listen="0.0.0.0",
         port=PORT,
         url_path=TELEGRAM_BOT_TOKEN,
@@ -222,5 +237,8 @@ def main() -> None:
     )
 
 if __name__ == '__main__':
-    main()
+    try:
+        asyncio.run(main())
+    except Exception as e:
+        logger.critical(f"Bot failed to start: {e}")
 
