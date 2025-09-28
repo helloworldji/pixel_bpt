@@ -68,41 +68,76 @@ except Exception as e:
     model = genai.GenerativeModel('gemini-1.5-flash')
 
 # =========================
-# Instagram Reset Bot Feature - SIMPLIFIED
+# Instagram Reset Bot Feature - FIXED 403 ERROR
 # =========================
 
 async def send_password_reset(target: str):
-    """Send password reset request to Instagram"""
+    """Send password reset request to Instagram with proper headers to avoid 403"""
     try:
-        # Simple Instagram reset implementation
+        # Use a residential proxy-like approach with proper headers
+        session = requests.Session()
+        
+        # Realistic headers to avoid 403
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Origin': 'https://www.instagram.com',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'same-origin',
+        }
+        
+        # First get the CSRF token
+        logger.info("Getting CSRF token from Instagram...")
+        csrf_response = session.get('https://www.instagram.com/accounts/password/reset/', headers=headers, timeout=10)
+        
+        csrf_token = None
+        if 'csrftoken' in session.cookies:
+            csrf_token = session.cookies['csrftoken']
+            headers['X-CSRFToken'] = csrf_token
+        
+        # Prepare reset data
         if '@' in target:
             data = {'email_or_username': target}
-        else: 
+        else:
             data = {'username_or_email': target}
         
-        # Simple headers
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Content-Type': 'application/x-www-form-urlencoded',
-        }
+        if csrf_token:
+            data['csrfmiddlewaretoken'] = csrf_token
         
         logger.info(f"Attempting Instagram reset for: {target}")
         
-        # Simple POST request
-        response = requests.post(
+        # Send reset request
+        response = session.post(
             'https://www.instagram.com/accounts/account_recovery_send_ajax/',
             headers=headers,
             data=data,
-            timeout=10
+            timeout=15
         )
         
         logger.info(f"Response Status: {response.status_code}")
         
         if response.status_code == 200:
-            return f"Password reset attempt completed for: {target}"
+            response_data = response.json()
+            if response_data.get('status') == 'ok':
+                return f"Password reset email sent successfully for: {target}"
+            else:
+                return f"Instagram responded but reset failed for: {target}"
+        elif response.status_code == 403:
+            return f"Access denied by Instagram (403) for: {target}. Try again later."
         else:
-            return f"Instagram reset failed for: {target} (Status: {response.status_code})"
+            return f"Instagram returned status {response.status_code} for: {target}"
             
+    except requests.exceptions.Timeout:
+        return f"Request timeout for: {target}"
+    except requests.exceptions.ConnectionError:
+        return f"Connection error for: {target}"
     except Exception as e:
         logger.error(f"Error in Instagram reset: {e}")
         return f"Error processing reset for: {target}"
@@ -124,7 +159,7 @@ async def insta_reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         return INSTA_MODE
     
     processing_msg = await update.message.reply_text(
-        f"Processing Instagram reset for: {target}\nPlease wait..."
+        f"Processing Instagram reset for: {target}\nThis may take 10-15 seconds..."
     )
     
     # Send reset request
@@ -150,13 +185,66 @@ async def insta_bulk_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     results = []
     for i, target in enumerate(targets, 1):
-        await asyncio.sleep(2)
+        await asyncio.sleep(5)  # Increased delay to avoid rate limiting
         result = await send_password_reset(target)
         results.append(f"{i}. {result}")
+        
+        # Update progress
+        progress_text = f"Progress: {i}/{len(targets)} accounts\n\n" + "\n".join(results[-3:])
+        await processing_msg.edit_text(progress_text)
     
     final_text = "Bulk Reset Results:\n" + "\n".join(results)
     await processing_msg.edit_text(final_text)
     return INSTA_MODE
+
+# =========================
+# Image Compression Functions
+# =========================
+
+def compress_image(image_bytes, max_size=(1024, 1024), quality=85):
+    """Compress image to reduce file size and prevent message length errors"""
+    try:
+        image = Image.open(io.BytesIO(image_bytes))
+        
+        # Convert to RGB if necessary (for JPEG)
+        if image.mode in ('RGBA', 'P'):
+            image = image.convert('RGB')
+        
+        # Resize if image is too large
+        image.thumbnail(max_size, Image.Resampling.LANCZOS)
+        
+        # Save compressed image to bytes
+        output_buffer = io.BytesIO()
+        image.save(output_buffer, format='JPEG', quality=quality, optimize=True)
+        compressed_bytes = output_buffer.getvalue()
+        
+        logger.info(f"Image compressed from {len(image_bytes)} to {len(compressed_bytes)} bytes")
+        return compressed_bytes
+        
+    except Exception as e:
+        logger.error(f"Error compressing image: {e}")
+        return image_bytes  # Return original if compression fails
+
+def split_long_message(text, max_length=4000):
+    """Split long messages into chunks to avoid Telegram message limits"""
+    if len(text) <= max_length:
+        return [text]
+    
+    chunks = []
+    while text:
+        if len(text) <= max_length:
+            chunks.append(text)
+            break
+        
+        # Find the last space within the limit
+        split_index = text.rfind(' ', 0, max_length)
+        if split_index == -1:
+            split_index = max_length
+        
+        chunks.append(text[:split_index])
+        text = text[split_index:].strip()
+    
+    return chunks
 
 # =========================
 # Main Menu & Mode Management
@@ -354,7 +442,14 @@ async def chat_mode_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_conversations[user_id] = user_conversations[user_id][-20:]
         
         safe_response = html.escape(response.text)
-        await update.message.reply_text(f"{safe_response}\n\n@aadi_io")
+        
+        # Split long messages
+        message_chunks = split_long_message(safe_response)
+        for i, chunk in enumerate(message_chunks):
+            if i == len(message_chunks) - 1:
+                await update.message.reply_text(f"{chunk}\n\n@aadi_io")
+            else:
+                await update.message.reply_text(chunk)
         
     except Exception as e:
         logger.error(f"Error in chat mode: {e}")
@@ -398,7 +493,9 @@ async def ocr_mode_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         photo_file = await update.message.photo[-1].get_file()
         photo_bytes = await photo_file.download_as_bytearray()
         
-        image = Image.open(io.BytesIO(photo_bytes))
+        # Compress image before processing
+        compressed_bytes = compress_image(photo_bytes)
+        image = Image.open(io.BytesIO(compressed_bytes))
         
         response = model.generate_content([
             "Extract all the text from this image. Return only the extracted text without any additional commentary or formatting.",
@@ -409,11 +506,18 @@ async def ocr_mode_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if extracted_text:
             safe_text = html.escape(extracted_text)
-            await update.message.reply_text(
-                f"Extracted Text:\n\n{safe_text}\n\n"
-                f"OCR Mode still active - send another image or use /mode to switch.\n\n"
-                f"@aadi_io"
-            )
+            
+            # Split long OCR results
+            message_chunks = split_long_message(safe_text)
+            for i, chunk in enumerate(message_chunks):
+                if i == len(message_chunks) - 1:
+                    await update.message.reply_text(
+                        f"Extracted Text:\n\n{chunk}\n\n"
+                        f"OCR Mode still active - send another image or use /mode to switch.\n\n"
+                        f"@aadi_io"
+                    )
+                else:
+                    await update.message.reply_text(chunk)
         else:
             await update.message.reply_text(
                 "No text could be extracted from the image.\n\n"
@@ -436,7 +540,7 @@ async def ocr_mode_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================
 
 async def sshot_mode_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle images in screenshot mode"""
+    """Handle images in screenshot mode with compression"""
     if not update.message.photo:
         await update.message.reply_text(
             "Screenshot Mode Active\n\n"
@@ -451,18 +555,19 @@ async def sshot_mode_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         photo_file = await update.message.photo[-1].get_file()
         photo_bytes = await photo_file.download_as_bytearray()
         
-        image = Image.open(io.BytesIO(photo_bytes))
+        # Compress image before processing to avoid size issues
+        compressed_bytes = compress_image(photo_bytes)
+        image = Image.open(io.BytesIO(compressed_bytes))
         
         analysis_prompt = """
-        Analyze this screenshot thoroughly and provide a structured response with:
+        Analyze this screenshot and provide:
+        1. Overview of what's visible
+        2. Key elements and text
+        3. Any issues or notable observations
+        4. Solutions and recommendations
+        5. Best practices
 
-        1. Overview: Brief description of what's visible
-        2. Key Elements: Important UI components, text, or visual elements
-        3. Issues & Analysis: Any problems, errors, or notable observations
-        4. Solutions & Recommendations: Practical steps to resolve identified issues
-        5. Best Practices: Suggestions for prevention or improvement
-
-        Be specific, actionable, and focus on providing clear guidance.
+        Be specific and focus on clear guidance. Keep response concise.
         """
         
         response = model.generate_content([analysis_prompt, image])
@@ -471,11 +576,18 @@ async def sshot_mode_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         
         if analysis_text:
             safe_analysis = html.escape(analysis_text)
-            await update.message.reply_text(
-                f"Screenshot Analysis:\n\n{safe_analysis}\n\n"
-                f"Screenshot Mode still active - send another screenshot or use /mode to switch.\n\n"
-                f"@aadi_io"
-            )
+            
+            # Split long analysis results to avoid message length errors
+            message_chunks = split_long_message(safe_analysis)
+            for i, chunk in enumerate(message_chunks):
+                if i == len(message_chunks) - 1:
+                    await update.message.reply_text(
+                        f"Screenshot Analysis:\n\n{chunk}\n\n"
+                        f"Screenshot Mode still active - send another screenshot or use /mode to switch.\n\n"
+                        f"@aadi_io"
+                    )
+                else:
+                    await update.message.reply_text(chunk)
         else:
             await update.message.reply_text(
                 "I couldn't generate a detailed analysis for this screenshot. Please try with a clearer image.\n\n"
