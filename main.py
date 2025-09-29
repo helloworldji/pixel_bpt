@@ -7,16 +7,18 @@ import string
 import random
 import requests
 import google.generativeai as genai
-from telegram import Update, BotCommand, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from telegram import Update, BotCommand, ReplyKeyboardMarkup, ReplyKeyboardRemove, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
     ContextTypes,
     ConversationHandler,
+    CallbackQueryHandler,
     filters
 )
 from telegram.request import HTTPXRequest
+from telegram.error import BadRequest, Forbidden
 from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
 import uvicorn
@@ -59,6 +61,14 @@ user_conversations = {}
 # Conversation states
 MAIN_MENU, CHAT_MODE, OCR_MODE, SSHOT_MODE, INSTA_MODE = range(5)
 
+# Channel configuration for Instagram reset feature
+CHANNELS = [
+    {"url": "https://t.me/+YEObPfKXsK1hNjU9", "name": "Main Channel", "id": "-1002628211220"},
+    {"url": "https://t.me/pytimebruh", "name": "Backup 1", "id": "@pytimebruh"},
+    {"url": "https://t.me/HazyPy", "name": "Backup 2", "id": "@HazyPy"},
+    {"url": "https://t.me/HazyGC", "name": "Chat Group", "id": "@HazyGC"}
+]
+
 # Initialize Gemini model
 try:
     model = genai.GenerativeModel('gemini-2.5-flash-preview-05-20')
@@ -68,82 +78,186 @@ except Exception as e:
     model = genai.GenerativeModel('gemini-1.5-flash')
 
 # =========================
-# Instagram Reset Bot Feature - FIXED 403 ERROR
+# Instagram Reset Bot Feature - FIXED API METHOD
 # =========================
 
-async def send_password_reset(target: str):
-    """Send password reset request to Instagram with proper headers to avoid 403"""
-    try:
-        # Use a residential proxy-like approach with proper headers
-        session = requests.Session()
+class InstagramResetHandler:
+    def __init__(self):
+        self.user_sessions = {}
+
+    async def check_channel_subscription(self, user_id: int, context: ContextTypes.DEFAULT_TYPE) -> tuple[bool, list]:
+        """
+        Check if user is subscribed to all channels
+        Returns (is_subscribed, not_joined_channels)
+        """
+        not_joined = []
         
-        # Realistic headers to avoid 403
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Content-Type': 'application/x-www-form-urlencoded',
-            'Origin': 'https://www.instagram.com',
-            'DNT': '1',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'same-origin',
-        }
-        
-        # First get the CSRF token
-        logger.info("Getting CSRF token from Instagram...")
-        csrf_response = session.get('https://www.instagram.com/accounts/password/reset/', headers=headers, timeout=10)
-        
-        csrf_token = None
-        if 'csrftoken' in session.cookies:
-            csrf_token = session.cookies['csrftoken']
-            headers['X-CSRFToken'] = csrf_token
-        
-        # Prepare reset data
-        if '@' in target:
-            data = {'email_or_username': target}
-        else:
-            data = {'username_or_email': target}
-        
-        if csrf_token:
-            data['csrfmiddlewaretoken'] = csrf_token
-        
-        logger.info(f"Attempting Instagram reset for: {target}")
-        
-        # Send reset request
-        response = session.post(
-            'https://www.instagram.com/accounts/account_recovery_send_ajax/',
-            headers=headers,
-            data=data,
-            timeout=15
-        )
-        
-        logger.info(f"Response Status: {response.status_code}")
-        
-        if response.status_code == 200:
-            response_data = response.json()
-            if response_data.get('status') == 'ok':
-                return f"Password reset email sent successfully for: {target}"
-            else:
-                return f"Instagram responded but reset failed for: {target}"
-        elif response.status_code == 403:
-            return f"Access denied by Instagram (403) for: {target}. Try again later."
-        else:
-            return f"Instagram returned status {response.status_code} for: {target}"
+        for channel in CHANNELS:
+            try:
+                chat_id = channel['id']
+                member = await context.bot.get_chat_member(chat_id, user_id)
+                
+                # Check if user is a member (not left or kicked)
+                if member.status in ['left', 'kicked']:
+                    not_joined.append(channel)
+                    logger.info(f"User {user_id} not in channel {channel['name']}: {member.status}")
+                    
+            except BadRequest as e:
+                logger.error(f"BadRequest checking {channel['name']}: {e}")
+                # If we can't check, assume they're not joined
+                not_joined.append(channel)
+                
+            except Forbidden as e:
+                logger.error(f"Bot not admin in {channel['name']}: {e}")
+                # Critical: Bot needs to be admin to check membership
+                not_joined.append(channel)
+                
+            except Exception as e:
+                logger.error(f"Error checking channel {channel['name']}: {e}")
+                not_joined.append(channel)
+                
+        return len(not_joined) == 0, not_joined
+
+    async def send_password_reset(self, target: str) -> str:
+        """Send password reset request to Instagram using mobile API method"""
+        try:
+            # Generate random device identifiers
+            device_id = f"android-{''.join(random.choices(string.hexdigits, k=16))}"
+            guid = str(uuid.uuid4())
             
-    except requests.exceptions.Timeout:
-        return f"Request timeout for: {target}"
-    except requests.exceptions.ConnectionError:
-        return f"Connection error for: {target}"
-    except Exception as e:
-        logger.error(f"Error in Instagram reset: {e}")
-        return f"Error processing reset for: {target}"
+            # Prepare data based on input type
+            if '@' in target:
+                data = {
+                    'email_or_username': target,
+                    'device_id': device_id,
+                }
+            else:
+                data = {
+                    'username_or_email': target,
+                    'device_id': device_id,
+                }
+            
+            # Mobile API headers
+            headers = {
+                'User-Agent': 'Instagram 219.0.0.12.117 Android',
+                'Accept': '*/*',
+                'Accept-Language': 'en-US',
+                'Accept-Encoding': 'gzip, deflate',
+                'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                'X-IG-Capabilities': '3brTvw==',
+                'X-IG-Connection-Type': 'WIFI',
+                'X-IG-App-ID': '567067343352427',
+                'Connection': 'close',
+            }
+            
+            logger.info(f"Attempting Instagram API reset for: {target}")
+            
+            # Use the account recovery endpoint
+            response = requests.post(
+                'https://i.instagram.com/api/v1/accounts/send_password_reset/',
+                headers=headers,
+                data=data,
+                timeout=30
+            )
+            
+            logger.info(f"API Response Status: {response.status_code}")
+            logger.info(f"API Response: {response.text}")
+            
+            if response.status_code == 200:
+                response_data = response.json()
+                if response_data.get('status') == 'ok':
+                    return f"✅ Password reset email sent successfully for: {target}"
+                else:
+                    error_msg = response_data.get('message', 'Unknown error')
+                    return f"❌ Instagram API error for {target}: {error_msg}"
+            elif response.status_code == 400:
+                return f"❌ Bad request (400) for {target}. This usually means the account doesn't exist or Instagram blocked the request."
+            elif response.status_code == 429:
+                return f"❌ Rate limit exceeded for {target}. Please try again later."
+            else:
+                return f"❌ Instagram returned status {response.status_code} for: {target}"
+                
+        except requests.exceptions.Timeout:
+            return f"❌ Request timeout for: {target}"
+        except requests.exceptions.ConnectionError:
+            return f"❌ Connection error for: {target}"
+        except Exception as e:
+            logger.error(f"Error in Instagram API reset: {e}")
+            return f"❌ Error processing reset for: {target}"
+
+    async def create_subscription_keyboard(self, not_joined_channels=None) -> InlineKeyboardMarkup:
+        """Create subscription check keyboard"""
+        keyboard = []
+        
+        channels_to_show = not_joined_channels if not_joined_channels else CHANNELS
+        
+        for channel in channels_to_show:
+            keyboard.append([InlineKeyboardButton(
+                f"🔗 Join {channel['name']}", 
+                url=channel['url']
+            )])
+        
+        keyboard.append([InlineKeyboardButton(
+            "✅ I JOINED ALL CHANNELS", 
+            callback_data="check_subscription"
+        )])
+        
+        return InlineKeyboardMarkup(keyboard)
+
+    async def send_force_join_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE, not_joined_channels: list = None):
+        """Send force join message"""
+        keyboard = await self.create_subscription_keyboard(not_joined_channels)
+        
+        message_text = """
+🚫 **ACCESS RESTRICTED** 🚫
+
+❗️ **You must join ALL our channels to use Instagram Reset!**
+
+📋 **Missing channels:**
+"""
+        
+        if not_joined_channels:
+            for channel in not_joined_channels:
+                message_text += f"• {channel['name']}\n"
+        else:
+            message_text += "• Please join all channels below\n"
+            
+        message_text += """
+🔄 **Steps:**
+1️⃣ Click each "Join" button below
+2️⃣ Join ALL channels/groups  
+3️⃣ Click "I JOINED ALL CHANNELS"
+
+⚠️ **Bot will verify your membership!**
+        """
+        
+        if update.callback_query:
+            await update.callback_query.edit_message_text(
+                message_text,
+                reply_markup=keyboard,
+                parse_mode='Markdown'
+            )
+        else:
+            await update.message.reply_text(
+                message_text,
+                reply_markup=keyboard,
+                parse_mode='Markdown'
+            )
+
+# Create Instagram handler instance
+insta_handler = InstagramResetHandler()
 
 async def insta_reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle Instagram reset in Instagram mode"""
+    user_id = update.effective_user.id
+    
+    # Check subscription
+    subscribed, not_joined = await insta_handler.check_channel_subscription(user_id, context)
+    
+    if not subscribed:
+        await insta_handler.send_force_join_message(update, context, not_joined)
+        return INSTA_MODE
+    
     if not context.args:
         await update.message.reply_text(
             "Usage: /rst username_or_email\nExample: /rst johndoe\nExample: /rst johndoe@gmail.com"
@@ -159,16 +273,26 @@ async def insta_reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         return INSTA_MODE
     
     processing_msg = await update.message.reply_text(
-        f"Processing Instagram reset for: {target}\nThis may take 10-15 seconds..."
+        f"🔄 Processing Instagram reset for: `{target}`\nThis may take 10-15 seconds...",
+        parse_mode='Markdown'
     )
     
-    # Send reset request
-    result = await send_password_reset(target)
-    await processing_msg.edit_text(result)
+    # Send reset request using the API method
+    result = await insta_handler.send_password_reset(target)
+    await processing_msg.edit_text(result, parse_mode='Markdown')
     return INSTA_MODE
 
 async def insta_bulk_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle bulk Instagram reset"""
+    user_id = update.effective_user.id
+    
+    # Check subscription
+    subscribed, not_joined = await insta_handler.check_channel_subscription(user_id, context)
+    
+    if not subscribed:
+        await insta_handler.send_force_join_message(update, context, not_joined)
+        return INSTA_MODE
+    
     if not context.args:
         await update.message.reply_text(
             "Usage: /blk user1 user2 user3\nMax 3 accounts per request"
@@ -180,22 +304,47 @@ async def insta_bulk_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("Limited to 3 accounts per request")
     
     processing_msg = await update.message.reply_text(
-        f"Processing bulk Instagram reset for {len(targets)} accounts..."
+        f"🔄 Processing bulk Instagram reset for {len(targets)} accounts...",
+        parse_mode='Markdown'
     )
     
     results = []
     for i, target in enumerate(targets, 1):
-        await asyncio.sleep(5)  # Increased delay to avoid rate limiting
-        result = await send_password_reset(target)
+        await asyncio.sleep(5)  # Rate limiting
+        result = await insta_handler.send_password_reset(target)
         results.append(f"{i}. {result}")
         
         # Update progress
         progress_text = f"Progress: {i}/{len(targets)} accounts\n\n" + "\n".join(results[-3:])
-        await processing_msg.edit_text(progress_text)
+        await processing_msg.edit_text(progress_text, parse_mode='Markdown')
     
-    final_text = "Bulk Reset Results:\n" + "\n".join(results)
-    await processing_msg.edit_text(final_text)
+    final_text = "📊 Bulk Reset Results:\n" + "\n".join(results)
+    await processing_msg.edit_text(final_text, parse_mode='Markdown')
     return INSTA_MODE
+
+async def insta_button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle button callbacks for Instagram subscription"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    
+    if query.data == "check_subscription":
+        # Re-check subscription
+        subscribed, not_joined = await insta_handler.check_channel_subscription(user_id, context)
+        
+        if subscribed:
+            await query.edit_message_text(
+                "✅ **Verification Successful!** 🎉\n\n"
+                "🔓 **You can now use Instagram reset features!**\n\n"
+                "📖 Use /help to see available commands.\n"
+                "🚀 Use /rst for single reset\n"
+                "⚡ Use /blk for bulk reset\n\n"
+                "@aadi_io",
+                parse_mode='Markdown'
+            )
+        else:
+            await insta_handler.send_force_join_message(update, context, not_joined)
 
 # =========================
 # Image Compression Functions
@@ -311,20 +460,30 @@ async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def switch_to_insta_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Switch to Instagram reset mode"""
     try:
+        user_id = update.effective_user.id
+        
+        # Check subscription when switching to Instagram mode
+        subscribed, not_joined = await insta_handler.check_channel_subscription(user_id, context)
+        
+        if not subscribed:
+            await insta_handler.send_force_join_message(update, context, not_joined)
+            return INSTA_MODE
+            
         await update.message.reply_text(
-            "SWITCHED TO INSTAGRAM RESET MODE\n\n"
-            "INSTAGRAM PASSWORD RECOVERY TOOL\n\n"
-            "Available Commands:\n"
+            "🔓 **INSTAGRAM RESET MODE ACTIVATED** 🔓\n\n"
+            "✨ *Welcome to the most advanced IG recovery tool!* ✨\n\n"
+            "🚀 **Available Commands:**\n"
             "/rst username - Single account reset\n"
             "/rst email@gmail.com - Reset by email\n"
             "/blk user1 user2 - Bulk reset (max 3 accounts)\n\n"
-            "Examples:\n"
+            "💫 **Examples:**\n"
             "/rst johndoe\n"
             "/rst johndoe@gmail.com\n"
             "/blk user1 user2 user3\n\n"
-            "Use /mode to return to mode selection\n\n"
+            "⚡ *Start recovering now!*\n\n"
             "@aadi_io",
-            reply_markup=ReplyKeyboardRemove()
+            reply_markup=ReplyKeyboardRemove(),
+            parse_mode='Markdown'
         )
         return INSTA_MODE
     except Exception as e:
@@ -392,23 +551,30 @@ async def insta_mode_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return INSTA_MODE
     
     help_text = """
-Instagram Reset Mode Active
+🔓 **Instagram Reset Mode Active** 🔓
 
-MAIN FEATURE - INSTAGRAM PASSWORD RECOVERY
+✨ *Advanced Instagram Password Recovery Tool* ✨
 
-Available Commands:
+**Available Commands:**
 /rst username - Single account reset
 /rst email@gmail.com - Reset by email  
 /blk user1 user2 - Bulk reset (max 3 accounts)
 
-Examples:
+**Examples:**
 /rst johndoe
 /rst johndoe@gmail.com  
 /blk user1 user2 user3
 
+💡 **Tips:**
+• Use username or email
+• Works with both public and private accounts
+• High success rate
+
 Use /mode to return to main menu.
+
+@aadi_io
     """
-    await update.message.reply_text(help_text)
+    await update.message.reply_text(help_text, parse_mode='Markdown')
     return INSTA_MODE
 
 # =========================
@@ -612,64 +778,65 @@ async def sshot_mode_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /help command"""
     help_text = """
-MULTI-FEATURE BOT - Complete Help Guide
+🤖 **MULTI-FEATURE BOT - Complete Help Guide** 🤖
 
-MAIN FEATURE: INSTAGRAM PASSWORD RESET
+🔓 **MAIN FEATURE: INSTAGRAM PASSWORD RESET**
 
-Available Modes:
-Instagram Reset - Password recovery tool
-Chat Mode - AI conversations
-OCR Mode - Extract text from images  
-Screenshot Mode - Analyze screenshots & provide solutions
+📋 **Available Modes:**
+• Instagram Reset - Password recovery tool
+• Chat Mode - AI conversations
+• OCR Mode - Extract text from images  
+• Screenshot Mode - Analyze screenshots & provide solutions
 
-Instagram Reset Commands:
+🔧 **Instagram Reset Commands:**
 /rst username - Single account reset
 /rst email@gmail.com - Reset by email
 /blk user1 user2 - Bulk reset (max 3 accounts)
 
-General Commands:
+⚡ **General Commands:**
 /start - Start bot and select mode
 /mode - Return to mode selection  
 /newchat - Reset conversation history (in chat mode)
 
-Instant Access - No Verification Required
+💫 **Instant Access - No Verification Required**
 
-Usage: Select a mode, then interact normally!
+🚀 **Usage:** Select a mode, then interact normally!
 
 @aadi_io
     """
-    await update.message.reply_text(help_text)
+    await update.message.reply_text(help_text, parse_mode='Markdown')
 
 async def about_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /about command"""
     about_text = """
-About This Multi-Feature Bot
+ℹ️ **About This Multi-Feature Bot**
 
-Developer: @aadi_io
+👨‍💻 **Developer:** @aadi_io
 
-FEATURED CAPABILITIES:
+🌟 **FEATURED CAPABILITIES:**
 
-MAIN FEATURE: Instagram Password Recovery
-Instant password reset tool
-Bulk account support
-Enhanced error handling
+🔓 **MAIN FEATURE: Instagram Password Recovery**
+• Instant password reset tool
+• Bulk account support
+• Enhanced error handling
+• Channel subscription system
 
-Additional Features:
-AI-powered conversations
-Image text extraction (OCR)
-Screenshot analysis & troubleshooting
+🤖 **Additional Features:**
+• AI-powered conversations
+• Image text extraction (OCR)
+• Screenshot analysis & troubleshooting
 
-Core Technologies:
-Telegram Bot API
-AI Integration
-FastAPI Web Framework
-Python
+🛠️ **Core Technologies:**
+• Telegram Bot API
+• AI Integration
+• FastAPI Web Framework
+• Python
 
-Instant Access - No Verification Required
+⚡ **Instant Access - No Verification Required**
 
 @aadi_io
     """
-    await update.message.reply_text(about_text)
+    await update.message.reply_text(about_text, parse_mode='Markdown')
 
 # =========================
 # Error Handler
@@ -765,6 +932,7 @@ async def initialize_bot():
                     MessageHandler(filters.TEXT & ~filters.COMMAND, insta_mode_handler),
                     CommandHandler("rst", insta_reset_command),
                     CommandHandler("blk", insta_bulk_command),
+                    CallbackQueryHandler(insta_button_callback, pattern="^check_subscription$")
                 ],
             },
             fallbacks=[
