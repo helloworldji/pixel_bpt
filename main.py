@@ -76,22 +76,26 @@ async def send_password_reset(target: str) -> str:
     """
     Send password reset request to Instagram.
     This function is adapted from the stable, single-purpose bot.
+    It now intelligently handles username, email, or user_id.
     """
     try:
+        # Base data payload
+        data = {
+            '_csrftoken': ''.join(random.choices(string.ascii_letters + string.digits, k=32)),
+            'guid': str(uuid.uuid4()),
+            'device_id': str(uuid.uuid4())
+        }
+        
+        # Intelligently determine the type of target
         if '@' in target:
-            data = {
-                '_csrftoken': ''.join(random.choices(string.ascii_letters + string.digits, k=32)),
-                'user_email': target,
-                'guid': str(uuid.uuid4()),
-                'device_id': str(uuid.uuid4())
-            }
+            data['user_email'] = target
+            logger.info(f"Attempting reset for email: {target}")
+        elif target.isdigit():
+            data['user_id'] = target
+            logger.info(f"Attempting reset for User ID: {target}")
         else: 
-            data = {
-                '_csrftoken': ''.join(random.choices(string.ascii_letters + string.digits, k=32)),
-                'username': target,
-                'guid': str(uuid.uuid4()),
-                'device_id': str(uuid.uuid4())
-            }
+            data['username'] = target
+            logger.info(f"Attempting reset for username: {target}")
         
         headers = {
             'user-agent': f"Instagram 150.0.0.0.000 Android (29/10; 300dpi; 720x1440; {''.join(random.choices(string.ascii_lowercase + string.digits, k=16))}/{''.join(random.choices(string.ascii_lowercase + string.digits, k=16))}; {''.join(random.choices(string.ascii_lowercase + string.digits, k=16))}; {''.join(random.choices(string.ascii_lowercase + string.digits, k=16))}; en_GB;)"
@@ -106,6 +110,9 @@ async def send_password_reset(target: str) -> str:
             data=data,
             timeout=30
         )
+        
+        if response.status_code == 404:
+            return f"❌ *User Not Found!* The account `{target}` does not exist."
         
         if 'obfuscated_email' in response.text:
             return f"✅ *Success!* Password reset link sent for: `{target}`"
@@ -127,7 +134,7 @@ async def insta_reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     try:
         if not context.args:
             await update.message.reply_text(
-                "Usage: /rst username_or_email\nExample: /rst johndoe\nExample: /rst johndoe@gmail.com"
+                "Usage: /rst <username | email | user_id>\nExample: /rst johndoe\nExample: /rst 123456789"
             )
             return INSTA_MODE
         
@@ -324,8 +331,9 @@ async def switch_to_insta_mode(update: Update, context: ContextTypes.DEFAULT_TYP
         "🔓 *INSTAGRAM RESET MODE ACTIVATED*\n\n"
         "✨ Welcome to the Instagram Password Recovery Tool ✨\n\n"
         "🚀 *Available Commands:*\n"
-        "`/rst username` - Single account reset\n"
+        "`/rst username` - Reset by username\n"
         "`/rst email@gmail.com` - Reset by email\n"
+        "`/rst 1234567890` - Reset by User ID\n"
         "`/blk user1 user2` - Bulk reset (max 3 accounts)\n\n"
         "💫 *Examples:*\n"
         "`/rst johndoe`\n"
@@ -386,8 +394,8 @@ async def insta_mode_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     help_text = (
         "🔓 *Instagram Reset Mode Active*\n\n"
         "Please use a command to proceed:\n\n"
-        "`/rst <username/email>`\n"
-        "Example: `/rst johndoe`\n\n"
+        "`/rst <username/email/user_id>`\n"
+        "Example: `/rst johndoe` or `/rst 123456789`\n\n"
         "`/blk <user1> <user2> ...`\n"
         "Example: `/blk user1 user2`\n\n"
         "Use `/mode` to return to the main menu."
@@ -736,3 +744,5 @@ if __name__ == "__main__":
         port=port,
         log_level="info"
     )
+
+
