@@ -7,7 +7,8 @@ import string
 import random
 import requests
 import google.generativeai as genai
-from telegram import Update, BotCommand, ReplyKeyboardMarkup, ReplyKeyboardRemove, ParseMode
+from telegram import Update, BotCommand, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -583,7 +584,7 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         if update and update.effective_message:
-            await update.effective_message.reply_text(
+            await update.message.reply_text(
                 "❌ Sorry, an unexpected error occurred. Use /mode to return to the main menu."
             )
     except Exception as e:
@@ -744,5 +745,4 @@ if __name__ == "__main__":
         port=port,
         log_level="info"
     )
-
 
