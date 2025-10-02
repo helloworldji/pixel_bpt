@@ -6,3 +6,5 @@ pillow>=10.0.0
 httpx>=0.24.0
 python-multipart>=0.0.6
 qrcode[pil]
+fpdf2 
+python-dotenv
