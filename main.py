@@ -66,7 +66,7 @@ try:
     gemini_model = genai.GenerativeModel('gemini-1.5-flash')
     # A dedicated model for vision tasks with a specific system instruction for more reliable outputs.
     gemini_vision_model = genai.GenerativeModel(
-        'gemini-1.5-flash-latest',
+        'gemini-2.5-flash-preview-05-20',
         system_instruction="You are an expert image analyst. Your task is to analyze the provided image. If it primarily contains text (like a screenshot or document), perform OCR and return ONLY the extracted text, without any additional comments, formatting, or explanations. If the image is a photograph, describe its contents, context, and any notable elements in detail."
     )
     logger.info("Successfully initialized Gemini AI models.")
@@ -525,6 +525,7 @@ if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
     logger.info(f"Starting Uvicorn server on http://0.0.0.0:{port}")
     uvicorn.run(app, host="0.0.0.0", port=port)
+
 
 
 
