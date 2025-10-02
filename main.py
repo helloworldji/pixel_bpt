@@ -59,8 +59,8 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 WEBHOOK_URL = os.getenv('WEBHOOK_URL')
-# NEW: Get a free API key from https://openweathermap.org/
-WEATHER_API_KEY = os.getenv('WEATHER_API_KEY')
+# Using the provided Visual Crossing API Key
+WEATHER_API_KEY = "EKCSKX5PQBL52PZGCGJDXHCU4"
 
 if not BOT_TOKEN or not GEMINI_API_KEY:
     logger.critical("FATAL ERROR: Bot token or Gemini API key is missing!")
@@ -298,7 +298,7 @@ async def genpass_command_handler(update: Update, context: ContextTypes.DEFAULT_
         await update.message.reply_text("❌ An error occurred while generating the password.")
 
 async def weather_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Fetches and displays the weather for a specified city."""
+    """Fetches and displays the weather for a specified city using Visual Crossing API."""
     try:
         if not WEATHER_API_KEY:
             await update.message.reply_text("⚠️ The weather service is not configured. Please contact the bot admin.", parse_mode=ParseMode.MARKDOWN)
@@ -310,32 +310,29 @@ async def weather_command_handler(update: Update, context: ContextTypes.DEFAULT_
         city = " ".join(context.args)
         msg = await update.message.reply_text(f"🌤️ Fetching weather for *{city}*...", parse_mode=ParseMode.MARKDOWN)
         
-        api_url = f"http://api.openweathermap.org/data/2.5/weather?q={city}&appid={WEATHER_API_KEY}&units=metric"
+        api_url = f"https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/timeline/{city}/today?unitGroup=metric&include=current&key={WEATHER_API_KEY}&contentType=json"
         
         async with httpx.AsyncClient() as client:
             response = await client.get(api_url)
         
         if response.status_code == 200:
             data = response.json()
-            weather = data['weather'][0]
-            main = data['main']
-            wind = data['wind']
+            # The 'days' array contains the forecast, today is the first element
+            current_conditions = data['days'][0]
             
             weather_report = (
-                f"*{data['name']}, {data['sys']['country']}*\n"
-                f"*{weather['main']}* ({weather['description']})\n\n"
-                f"🌡️ *Temperature*: {main['temp']}°C (Feels like: {main['feels_like']}°C)\n"
-                f"💧 *Humidity*: {main['humidity']}%\n"
-                f"💨 *Wind Speed*: {wind['speed']} m/s"
+                f"*{data['resolvedAddress']}*\n"
+                f"*{current_conditions['conditions']}* ({current_conditions['description']})\n\n"
+                f"🌡️ *Temperature*: {current_conditions['temp']}°C (Feels like: {current_conditions['feelslike']}°C)\n"
+                f"💧 *Humidity*: {current_conditions['humidity']}%\n"
+                f"💨 *Wind Speed*: {current_conditions['windspeed']} km/h"
             )
             await msg.edit_text(weather_report, parse_mode=ParseMode.MARKDOWN)
-        elif response.status_code == 404:
-            await msg.edit_text(f"❌ Could not find the city *{city}*. Please check the spelling.", parse_mode=ParseMode.MARKDOWN)
         else:
-            await msg.edit_text("❌ An error occurred with the weather service.", parse_mode=ParseMode.MARKDOWN)
+            await msg.edit_text(f"❌ Could not retrieve weather for *{city}*. Please check the location or try again later.", parse_mode=ParseMode.MARKDOWN)
     except Exception as e:
         logger.error(f"Error in /weather handler: {e}", exc_info=True)
-        await update.message.reply_text("❌ An unexpected error occurred.")
+        await msg.edit_text("❌ An unexpected error occurred with the weather service.")
 
 # =====================================
 # NEW PDF CREATION FEATURE
