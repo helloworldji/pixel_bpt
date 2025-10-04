@@ -470,6 +470,6 @@ async def webhook_endpoint(token: str, request: Request):
         return JSONResponse(content={"status": "error"}, status_code=500)
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 8000))
+    port = int(os.getenv("PORT", 8080))
     uvicorn.run(app, host="0.0.0.0", port=port)
 
