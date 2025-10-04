@@ -24,6 +24,7 @@ import json
 from contextlib import asynccontextmanager
 import re
 import qrcode
+from typing import Tuple
 
 # =========================
 # Configuration
@@ -58,8 +59,9 @@ MAIN_MENU, INSTA_MODE = range(2)
 # Core Features
 # =========================
 
-async def send_password_reset(target: str, client: httpx.AsyncClient) -> str:
-    """Send a single password reset request using a shared httpx client."""
+# FIXED: Refactored to return a tuple (success_boolean, message_string) to separate logic from formatting.
+async def send_password_reset(target: str, client: httpx.AsyncClient) -> Tuple[bool, str]:
+    """Sends a password reset request and returns a status tuple."""
     try:
         data = {'guid': str(uuid.uuid4()), 'device_id': str(uuid.uuid4())}
         if '@' in target: data['user_email'] = target
@@ -71,23 +73,23 @@ async def send_password_reset(target: str, client: httpx.AsyncClient) -> str:
         response = await client.post('https://i.instagram.com/api/v1/accounts/send_password_reset/', headers=headers, data=data)
         
         if response.status_code == 404:
-            return f"❌ User Not Found: The account `{target}` does not exist."
+            return False, f"User Not Found: The account '{target}' does not exist."
         
         if 'obfuscated_email' in response.text:
-            return f"✅ Success: Password reset link sent for `{target}`."
+            return True, f"Password reset link sent for '{target}'."
         
         try:
             error_message = response.json().get('message', response.text)
-            return f"❌ Failed for `{target}`: {error_message}"
+            return False, f"Failed for '{target}': {error_message}"
         except json.JSONDecodeError:
-            return f"❌ Failed for `{target}`: {response.text}"
+            return False, f"Failed for '{target}': {response.text}"
             
     except httpx.RequestError as e:
         logger.error(f"Network error during password reset for {target}: {e}")
-        return f"❌ Network Error for `{target}`."
+        return False, f"Network Error for '{target}'."
     except Exception as e:
         logger.error(f"Exception during password reset for {target}: {e}")
-        return f"❌ An unexpected error occurred for `{target}`."
+        return False, f"An unexpected error occurred for '{target}'."
 
 # =========================
 # Utility Functions
@@ -168,14 +170,18 @@ async def insta_reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(escape_markdown("Usage: /rst <target>"), parse_mode=ParseMode.MARKDOWN_V2)
         return INSTA_MODE
     target = context.args[0].strip()
-    processing_msg = await update.message.reply_text(f"🔄 Processing reset for: `{escape_markdown(target)}`...", parse_mode=ParseMode.MARKDOWN_V2)
+    processing_msg = await update.message.reply_text(f"🔄 Processing reset for: `{escape_markdown(target)}`\\.\\.\\.", parse_mode=ParseMode.MARKDOWN_V2)
     
     proxy_url = "http://bgibhytx:nhrg5qvjfqy7@142.111.48.253:7030/"
     proxies = {'http://': proxy_url, 'https://': proxy_url}
     async with httpx.AsyncClient(proxies=proxies, timeout=30) as client:
-        result = await send_password_reset(target, client)
+        # FIXED: Logic is now handled here, not in the reset function.
+        success, message = await send_password_reset(target, client)
+    
+    icon = "✅" if success else "❌"
+    formatted_message = f"{icon} {escape_markdown(message)}"
         
-    await processing_msg.edit_text(escape_markdown(result), parse_mode=ParseMode.MARKDOWN_V2)
+    await processing_msg.edit_text(formatted_message, parse_mode=ParseMode.MARKDOWN_V2)
     return INSTA_MODE
 
 async def insta_bulk_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -184,15 +190,21 @@ async def insta_bulk_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return INSTA_MODE
         
     targets = list(set([t.strip() for t in context.args[:3] if t.strip()]))
-    await update.message.reply_text(f"🔄 Processing {len(targets)} accounts concurrently...")
+    await update.message.reply_text(f"🔄 Processing {len(targets)} accounts concurrently\\.\\.\\.")
     
     proxy_url = "http://bgibhytx:nhrg5qvjfqy7@142.111.48.253:7030/"
     proxies = {'http://': proxy_url, 'https://': proxy_url}
     async with httpx.AsyncClient(proxies=proxies, timeout=30) as client:
         tasks = [send_password_reset(target, client) for target in targets]
         results = await asyncio.gather(*tasks)
-        
-    final_text = "📊 *Bulk Reset Complete:*\n\n" + "\n\n".join(results)
+    
+    # FIXED: Format each result safely after receiving it.
+    formatted_results = []
+    for success, message in results:
+        icon = "✅" if success else "❌"
+        formatted_results.append(f"{icon} {escape_markdown(message)}")
+
+    final_text = "📊 *Bulk Reset Complete:*\n\n" + "\n\n".join(formatted_results)
     await update.message.reply_text(escape_markdown(final_text), parse_mode=ParseMode.MARKDOWN_V2)
     return INSTA_MODE
 
@@ -282,8 +294,6 @@ async def initialize_bot():
         return
 
     try:
-        # FIXED: Removed the problematic 'pool_limits' argument.
-        # The library's default connection management is sufficient and more stable.
         application = Application.builder().token(TELEGRAM_TOKEN).build()
         
         # Add handlers
@@ -297,7 +307,6 @@ async def initialize_bot():
             allow_reentry=True
         )
         application.add_handler(conv_handler)
-        # Add utility handlers outside the conversation
         application.add_handler(CommandHandler("genpass", genpass_command))
         application.add_handler(CommandHandler("shorten", shorten_command))
         application.add_handler(CommandHandler("qr", qr_command))
@@ -305,12 +314,10 @@ async def initialize_bot():
         application.add_handler(CommandHandler("about", about_command))
         application.add_error_handler(error_handler)
         
-        # Initialize and start application
         logger.info("PTB application configured. Initializing...")
         await application.initialize()
         await application.start()
         
-        # Set commands
         await application.bot.set_my_commands([
             BotCommand("start", "Show main menu"), BotCommand("mode", "Return to menu"),
             BotCommand("rst", "Reset an IG account"), BotCommand("blk", "Bulk reset IG accounts"),
@@ -318,7 +325,6 @@ async def initialize_bot():
             BotCommand("qr", "Create a QR code"), BotCommand("help", "Get help"),
         ])
         
-        # Set and verify webhook
         full_webhook_url = f"{WEBHOOK_URL.rstrip('/')}/{TELEGRAM_TOKEN}"
         logger.info(f"Attempting to set webhook to: {full_webhook_url}")
         await application.bot.set_webhook(full_webhook_url, allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
@@ -353,13 +359,11 @@ app = FastAPI(title="Telegram Utility Bot", lifespan=lifespan)
 
 @app.get("/", include_in_schema=False)
 async def root_path():
-    """A simple root endpoint to confirm the server is running."""
     return JSONResponse(content={"status": "ok", "message": "Bot server is running. Use /health for status."})
 
 
 @app.get("/health", include_in_schema=False)
 async def health_check():
-    """Diagnostic endpoint to check bot status."""
     if bot_status["initialized"] and bot_status["webhook_verified"]:
         return JSONResponse(content={"status": "ok", "message": "Bot is initialized and webhook is verified.", "details": bot_status["details"]})
     else:
