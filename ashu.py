@@ -5,7 +5,8 @@ import uuid
 import httpx
 import re
 import json
-from telegram import Update, BotCommand, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, ChatType
+from telegram import Update, BotCommand, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram.constants import ChatType
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -164,7 +165,6 @@ async def process_target_concurrently(target: str) -> bool:
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles /start command. Checks membership only in private chats."""
-    # MODIFIED: Check chat type.
     if update.effective_chat.type == ChatType.PRIVATE:
         statuses = await get_membership_statuses(update.effective_user.id, context)
         if all(statuses):
@@ -307,7 +307,6 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def pre_command_check(update: Update, context: ContextTypes.DEFAULT_TYPE, command_handler, is_conv_entry: bool = False):
     """Wrapper to check membership before executing a command. Skips check in group chats."""
-    # MODIFIED: Only check membership if in a private chat.
     if update.effective_chat.type == ChatType.PRIVATE:
         if all(await get_membership_statuses(update.effective_user.id, context)):
             return await command_handler(update, context)
