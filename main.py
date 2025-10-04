@@ -5,6 +5,7 @@ import uuid
 import string
 import random
 import httpx
+import re
 from telegram import Update, BotCommand, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (
     Application,
@@ -21,7 +22,7 @@ import io
 import json
 from contextlib import asynccontextmanager
 import qrcode
-from typing import Tuple
+from typing import Tuple, Dict, Optional
 
 # =========================
 # Configuration
@@ -37,7 +38,6 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 RENDER_EXTERNAL_URL = os.getenv('RENDER_EXTERNAL_URL')
 WEBHOOK_URL = RENDER_EXTERNAL_URL if RENDER_EXTERNAL_URL else os.getenv('WEBHOOK_URL')
-
 DEV_HANDLE = "@aadi_io"
 
 # Validate required environment variables
@@ -56,7 +56,8 @@ MAIN_MENU, INSTA_MODE = range(2)
 # Core Features
 # =========================
 
-async def send_password_reset(target: str, client: httpx.AsyncClient) -> Tuple[bool, str]:
+# FIXED: This function now accepts the proxies dictionary directly to pass to the post method.
+async def send_password_reset(target: str, client: httpx.AsyncClient, proxies: Optional[Dict[str, str]]) -> Tuple[bool, str]:
     """Sends a password reset request and returns a status tuple."""
     try:
         data = {'guid': str(uuid.uuid4()), 'device_id': str(uuid.uuid4())}
@@ -66,7 +67,8 @@ async def send_password_reset(target: str, client: httpx.AsyncClient) -> Tuple[b
 
         headers = {'user-agent': f"Instagram 150.0.0.0.000 Android (29/10; 300dpi; 720x1440; {''.join(random.choices(string.ascii_lowercase + string.digits, k=16))}/{''.join(random.choices(string.ascii_lowercase + string.digits, k=16))}; {''.join(random.choices(string.ascii_lowercase + string.digits, k=16))}; {''.join(random.choices(string.ascii_lowercase + string.digits, k=16))}; en_GB;)"}
         
-        response = await client.post('https://i.instagram.com/api/v1/accounts/send_password_reset/', headers=headers, data=data)
+        # FIXED: Proxies are now passed to the request method, not the client constructor.
+        response = await client.post('https://i.instagram.com/api/v1/accounts/send_password_reset/', headers=headers, data=data, proxies=proxies)
         
         if response.status_code == 404:
             return False, f"User Not Found: The account '{target}' does not exist."
@@ -104,10 +106,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Hello {user.first_name}!\n\n"
             "Welcome to the Utility Bot.\n\n"
             "Select a feature to get started:\n"
-            "• Instagram Reset\n"
-            "• Generate Password\n"
-            "• Shorten URL\n"
-            "• Create QR Code\n\n"
+            "- Instagram Reset\n"
+            "- Generate Password\n"
+            "- Shorten URL\n"
+            "- Create QR Code\n\n"
             f"Developed by {DEV_HANDLE}"
         )
         await update.message.reply_text(
@@ -117,7 +119,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return MAIN_MENU
     except Exception as e:
         logger.error(f"Error in start_command: {e}")
-        await update.message.reply_text("Welcome! Please select a mode using the keyboard.")
+        await update.message.reply_text("Welcome! Please select a feature using the keyboard.")
         return MAIN_MENU
 
 async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -139,9 +141,9 @@ async def switch_to_insta_mode(update: Update, context: ContextTypes.DEFAULT_TYP
     message = (
         "Instagram Reset Mode Activated.\n\n"
         "Available Commands:\n"
-        "`/rst username` - Reset by username\n"
-        "`/blk user1 user2` - Bulk reset (max 3)\n\n"
-        "Use `/mode` to return to the menu."
+        "/rst <username> - Reset by username\n"
+        "/blk <user1> <user2> - Bulk reset (max 3)\n\n"
+        "Use /mode to return to the menu."
     )
     await update.message.reply_text(message, reply_markup=ReplyKeyboardRemove())
     return INSTA_MODE
@@ -160,8 +162,11 @@ async def insta_reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     proxy_url = "http://bgibhytx:nhrg5qvjfqy7@142.111.48.253:7030/"
     proxies = {'http://': proxy_url, 'https://': proxy_url}
-    async with httpx.AsyncClient(proxies=proxies, timeout=30) as client:
-        success, message = await send_password_reset(target, client)
+    
+    # FIXED: The client is now initialized without the 'proxies' argument.
+    async with httpx.AsyncClient(timeout=30) as client:
+        # FIXED: The proxies dictionary is passed here instead.
+        success, message = await send_password_reset(target, client, proxies)
     
     icon = "✅" if success else "❌"
     formatted_message = f"{icon} {message}"
@@ -179,8 +184,11 @@ async def insta_bulk_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     proxy_url = "http://bgibhytx:nhrg5qvjfqy7@142.111.48.253:7030/"
     proxies = {'http://': proxy_url, 'https://': proxy_url}
-    async with httpx.AsyncClient(proxies=proxies, timeout=30) as client:
-        tasks = [send_password_reset(target, client) for target in targets]
+
+    # FIXED: The client is now initialized without the 'proxies' argument.
+    async with httpx.AsyncClient(timeout=30) as client:
+        # FIXED: The proxies dictionary is passed into the send_password_reset function.
+        tasks = [send_password_reset(target, client, proxies) for target in targets]
         results = await asyncio.gather(*tasks)
     
     formatted_results = []
@@ -193,7 +201,7 @@ async def insta_bulk_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return INSTA_MODE
 
 async def insta_mode_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Instagram Reset Mode: Use `/rst` or `/blk` to proceed.")
+    await update.message.reply_text("Instagram Reset Mode: Use /rst or /blk to proceed.")
     return INSTA_MODE
 
 async def genpass_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -242,7 +250,7 @@ async def qr_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     qrcode.make(text_to_encode).save(buffer, "PNG")
     buffer.seek(0)
     
-    await update.message.reply_photo(photo=buffer, caption=f"QR Code for: `{text_to_encode}`")
+    await update.message.reply_photo(photo=buffer, caption=f"QR Code for: {text_to_encode}")
 
 # --- Help, About, Error ---
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
