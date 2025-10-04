@@ -6,7 +6,6 @@ import string
 import random
 import httpx
 from telegram import Update, BotCommand, ReplyKeyboardMarkup, ReplyKeyboardRemove
-from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -15,14 +14,12 @@ from telegram.ext import (
     ConversationHandler,
     filters
 )
-from telegram.request import HTTPXRequest
 from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
 import uvicorn
 import io
 import json
 from contextlib import asynccontextmanager
-import re
 import qrcode
 from typing import Tuple
 
@@ -59,7 +56,6 @@ MAIN_MENU, INSTA_MODE = range(2)
 # Core Features
 # =========================
 
-# FIXED: Refactored to return a tuple (success_boolean, message_string) to separate logic from formatting.
 async def send_password_reset(target: str, client: httpx.AsyncClient) -> Tuple[bool, str]:
     """Sends a password reset request and returns a status tuple."""
     try:
@@ -92,15 +88,6 @@ async def send_password_reset(target: str, client: httpx.AsyncClient) -> Tuple[b
         return False, f"An unexpected error occurred for '{target}'."
 
 # =========================
-# Utility Functions
-# =========================
-
-def escape_markdown(text: str) -> str:
-    """Escapes special characters for Telegram MarkdownV2."""
-    escape_chars = r'_*[]()~`>#+-=|{}.!'
-    return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text)
-
-# =========================
 # Command Handlers & Conversation Flow
 # =========================
 
@@ -113,20 +100,19 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ["Generate Password", "Shorten URL"],
             ["Create QR Code", "Help"]
         ]
-        welcome_message = escape_markdown(
+        welcome_message = (
             f"Hello {user.first_name}!\n\n"
-            "🤖 *UTILITY BOT*\n\n"
+            "Welcome to the Utility Bot.\n\n"
             "Select a feature to get started:\n"
-            "• *Instagram Reset* - Password recovery tool\n"
-            "• *Generate Password* - Create a secure password\n"
-            "• *Shorten URL* - Make long links shorter\n"
-            "• *Create QR Code* - Generate a QR code from text\n\n"
+            "• Instagram Reset\n"
+            "• Generate Password\n"
+            "• Shorten URL\n"
+            "• Create QR Code\n\n"
             f"Developed by {DEV_HANDLE}"
         )
         await update.message.reply_text(
             welcome_message,
-            reply_markup=ReplyKeyboardMarkup(reply_keyboard, resize_keyboard=True, one_time_keyboard=True),
-            parse_mode=ParseMode.MARKDOWN_V2
+            reply_markup=ReplyKeyboardMarkup(reply_keyboard, resize_keyboard=True, one_time_keyboard=True)
         )
         return MAIN_MENU
     except Exception as e:
@@ -150,14 +136,14 @@ async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return MAIN_MENU
 
 async def switch_to_insta_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = escape_markdown(
-        "🔓 *INSTAGRAM RESET MODE ACTIVATED*\n\n"
-        "🚀 *Available Commands:*\n"
+    message = (
+        "Instagram Reset Mode Activated.\n\n"
+        "Available Commands:\n"
         "`/rst username` - Reset by username\n"
         "`/blk user1 user2` - Bulk reset (max 3)\n\n"
-        f"Use `/mode` to return to the menu.\nDeveloped by {DEV_HANDLE}"
+        "Use `/mode` to return to the menu."
     )
-    await update.message.reply_text(message, reply_markup=ReplyKeyboardRemove(), parse_mode=ParseMode.MARKDOWN_V2)
+    await update.message.reply_text(message, reply_markup=ReplyKeyboardRemove())
     return INSTA_MODE
 
 async def mode_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -167,30 +153,29 @@ async def mode_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- Feature-Specific Handlers ---
 async def insta_reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text(escape_markdown("Usage: /rst <target>"), parse_mode=ParseMode.MARKDOWN_V2)
+        await update.message.reply_text("Usage: /rst <target>")
         return INSTA_MODE
     target = context.args[0].strip()
-    processing_msg = await update.message.reply_text(f"🔄 Processing reset for: `{escape_markdown(target)}`\\.\\.\\.", parse_mode=ParseMode.MARKDOWN_V2)
+    processing_msg = await update.message.reply_text(f"Processing reset for: {target}...")
     
     proxy_url = "http://bgibhytx:nhrg5qvjfqy7@142.111.48.253:7030/"
     proxies = {'http://': proxy_url, 'https://': proxy_url}
     async with httpx.AsyncClient(proxies=proxies, timeout=30) as client:
-        # FIXED: Logic is now handled here, not in the reset function.
         success, message = await send_password_reset(target, client)
     
     icon = "✅" if success else "❌"
-    formatted_message = f"{icon} {escape_markdown(message)}"
+    formatted_message = f"{icon} {message}"
         
-    await processing_msg.edit_text(formatted_message, parse_mode=ParseMode.MARKDOWN_V2)
+    await processing_msg.edit_text(formatted_message)
     return INSTA_MODE
 
 async def insta_bulk_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text(escape_markdown("Usage: /blk user1 user2 ...\n(Max 3 accounts)"), parse_mode=ParseMode.MARKDOWN_V2)
+        await update.message.reply_text("Usage: /blk user1 user2 ...\n(Max 3 accounts)")
         return INSTA_MODE
         
     targets = list(set([t.strip() for t in context.args[:3] if t.strip()]))
-    await update.message.reply_text(f"🔄 Processing {len(targets)} accounts concurrently\\.\\.\\.")
+    processing_msg = await update.message.reply_text(f"Processing {len(targets)} accounts concurrently...")
     
     proxy_url = "http://bgibhytx:nhrg5qvjfqy7@142.111.48.253:7030/"
     proxies = {'http://': proxy_url, 'https://': proxy_url}
@@ -198,18 +183,17 @@ async def insta_bulk_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         tasks = [send_password_reset(target, client) for target in targets]
         results = await asyncio.gather(*tasks)
     
-    # FIXED: Format each result safely after receiving it.
     formatted_results = []
     for success, message in results:
         icon = "✅" if success else "❌"
-        formatted_results.append(f"{icon} {escape_markdown(message)}")
+        formatted_results.append(f"{icon} {message}")
 
-    final_text = "📊 *Bulk Reset Complete:*\n\n" + "\n\n".join(formatted_results)
-    await update.message.reply_text(escape_markdown(final_text), parse_mode=ParseMode.MARKDOWN_V2)
+    final_text = "Bulk Reset Complete:\n\n" + "\n\n".join(formatted_results)
+    await processing_msg.edit_text(final_text)
     return INSTA_MODE
 
 async def insta_mode_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(escape_markdown("🔓 *IG Reset Mode*\nUse `/rst` or `/blk` to proceed."), parse_mode=ParseMode.MARKDOWN_V2)
+    await update.message.reply_text("Instagram Reset Mode: Use `/rst` or `/blk` to proceed.")
     return INSTA_MODE
 
 async def genpass_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -222,7 +206,7 @@ async def genpass_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chars = string.ascii_letters + string.digits + string.punctuation
         password = ''.join(random.choice(chars) for _ in range(length))
         
-        await update.message.reply_text(f"Generated Password `({length} characters)`:\n`{escape_markdown(password)}`", parse_mode=ParseMode.MARKDOWN_V2)
+        await update.message.reply_text(f"Generated Password ({length} characters):\n`{password}`")
     except (ValueError, IndexError):
         await update.message.reply_text("Invalid length. Usage: /genpass <number between 8-64>")
 
@@ -258,27 +242,27 @@ async def qr_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     qrcode.make(text_to_encode).save(buffer, "PNG")
     buffer.seek(0)
     
-    await update.message.reply_photo(photo=buffer, caption=escape_markdown(f"QR Code for: `{text_to_encode}`"), parse_mode=ParseMode.MARKDOWN_V2)
+    await update.message.reply_photo(photo=buffer, caption=f"QR Code for: `{text_to_encode}`")
 
 # --- Help, About, Error ---
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = escape_markdown(
-        "🤖 *HELP GUIDE*\n\n"
-        "*/start* or */mode* - Return to the main menu.\n"
-        "*/rst <target>* - Reset an Instagram account.\n"
-        "*/blk <targets>* - Bulk reset IG accounts.\n"
-        "*/genpass <len>* - Generate a secure password.\n"
-        "*/shorten <url>* - Shorten a long URL.\n"
-        "*/qr <text>* - Create a QR code."
+    message = (
+        "Help Guide:\n\n"
+        "/start or /mode - Return to the main menu.\n"
+        "/rst <target> - Reset an Instagram account.\n"
+        "/blk <targets> - Bulk reset IG accounts.\n"
+        "/genpass <len> - Generate a secure password.\n"
+        "/shorten <url> - Shorten a long URL.\n"
+        "/qr <text> - Create a QR code."
     )
-    await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN_V2)
+    await update.message.reply_text(message)
 
 async def about_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(escape_markdown(f"ℹ️ *ABOUT*\n\nMulti-utility bot by {DEV_HANDLE}."), parse_mode=ParseMode.MARKDOWN_V2)
+    await update.message.reply_text(f"Multi-utility bot by {DEV_HANDLE}.")
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Update {update} caused error: {context.error}", exc_info=context.error)
-    if update and update.effective_message: await update.message.reply_text("❌ An unexpected error occurred.")
+    if update and update.effective_message: await update.message.reply_text("An unexpected error occurred.")
 
 # =========================
 # Bot Setup & Web Server
@@ -296,7 +280,6 @@ async def initialize_bot():
     try:
         application = Application.builder().token(TELEGRAM_TOKEN).build()
         
-        # Add handlers
         conv_handler = ConversationHandler(
             entry_points=[CommandHandler("start", start_command)],
             states={
