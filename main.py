@@ -56,7 +56,6 @@ MAIN_MENU, INSTA_MODE = range(2)
 # Core Features
 # =========================
 
-# FIXED: This function no longer needs the 'proxies' argument as it's handled by the client.
 async def send_password_reset(target: str, client: httpx.AsyncClient) -> Tuple[bool, str]:
     """Sends a password reset request and returns a status tuple."""
     try:
@@ -67,7 +66,6 @@ async def send_password_reset(target: str, client: httpx.AsyncClient) -> Tuple[b
 
         headers = {'user-agent': f"Instagram 150.0.0.0.000 Android (29/10; 300dpi; 720x1440; {''.join(random.choices(string.ascii_lowercase + string.digits, k=16))}/{''.join(random.choices(string.ascii_lowercase + string.digits, k=16))}; {''.join(random.choices(string.ascii_lowercase + string.digits, k=16))}; {''.join(random.choices(string.ascii_lowercase + string.digits, k=16))}; en_GB;)"}
         
-        # FIXED: The 'proxies' argument is removed from the .post() call.
         response = await client.post('https://i.instagram.com/api/v1/accounts/send_password_reset/', headers=headers, data=data)
         
         if response.status_code == 404:
@@ -160,11 +158,8 @@ async def insta_reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     target = context.args[0].strip()
     processing_msg = await update.message.reply_text(f"Processing reset for: {target}...")
     
-    proxy_url = "http://bgibhytx:nhrg5qvjfqy7@142.111.48.253:7030/"
-    proxies = {'http://': proxy_url, 'https://': proxy_url}
-    
-    # FIXED: The 'proxies' argument is now correctly passed to the AsyncClient constructor.
-    async with httpx.AsyncClient(proxies=proxies, timeout=30) as client:
+    # REMOVED: Proxy logic has been completely removed.
+    async with httpx.AsyncClient(timeout=30) as client:
         success, message = await send_password_reset(target, client)
     
     icon = "✅" if success else "❌"
@@ -181,11 +176,8 @@ async def insta_bulk_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     targets = list(set([t.strip() for t in context.args[:3] if t.strip()]))
     processing_msg = await update.message.reply_text(f"Processing {len(targets)} accounts concurrently...")
     
-    proxy_url = "http://bgibhytx:nhrg5qvjfqy7@142.111.48.253:7030/"
-    proxies = {'http://': proxy_url, 'https://': proxy_url}
-
-    # FIXED: The 'proxies' argument is now correctly passed to the AsyncClient constructor.
-    async with httpx.AsyncClient(proxies=proxies, timeout=30) as client:
+    # REMOVED: Proxy logic has been completely removed.
+    async with httpx.AsyncClient(timeout=30) as client:
         tasks = [send_password_reset(target, client) for target in targets]
         results = await asyncio.gather(*tasks)
     
@@ -212,9 +204,27 @@ async def genpass_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chars = string.ascii_letters + string.digits + string.punctuation
         password = ''.join(random.choice(chars) for _ in range(length))
         
-        await update.message.reply_text(f"Generated Password ({length} characters):\n`{password}`")
+        sent_message = await update.message.reply_text(
+            f"Generated Password ({length} characters):\n`{password}`\n\nThis message will be deleted in 1 minute."
+        )
+
+        asyncio.create_task(delete_messages_after_delay(
+            messages_to_delete=[sent_message, update.message],
+            delay=60
+        ))
+
     except (ValueError, IndexError):
         await update.message.reply_text("Invalid length. Usage: /genpass <number between 8-64>")
+
+async def delete_messages_after_delay(messages_to_delete: list, delay: int):
+    """Waits for a specified delay and then deletes a list of messages."""
+    await asyncio.sleep(delay)
+    for msg in messages_to_delete:
+        try:
+            await msg.delete()
+        except Exception as e:
+            logger.warning(f"Could not delete message {msg.message_id}: {e}")
+
 
 async def shorten_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
