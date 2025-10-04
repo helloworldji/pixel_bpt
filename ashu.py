@@ -5,7 +5,7 @@ import uuid
 import httpx
 import re
 import json
-from telegram import Update, BotCommand, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram import Update, BotCommand, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, ChatType
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -163,12 +163,18 @@ async def process_target_concurrently(target: str) -> bool:
 # =========================
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles /start command. Checks membership and shows appropriate message."""
-    statuses = await get_membership_statuses(update.effective_user.id, context)
-    if all(statuses):
-        await show_main_menu(update, context)
+    """Handles /start command. Checks membership only in private chats."""
+    # MODIFIED: Check chat type.
+    if update.effective_chat.type == ChatType.PRIVATE:
+        statuses = await get_membership_statuses(update.effective_user.id, context)
+        if all(statuses):
+            await show_main_menu(update, context)
+        else:
+            await send_join_prompt(update, context, statuses=statuses)
     else:
-        await send_join_prompt(update, context, statuses=statuses)
+        # In a group chat, bypass the check.
+        await show_main_menu(update, context)
+
 
 async def check_joined_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles the 'I Have Joined All' button press."""
@@ -299,13 +305,18 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     return ConversationHandler.END
 
 
-async def pre_command_check(update: Update, context: ContextTypes.DEFAULT_TYPE, command_handler):
-    """Wrapper to check membership before executing a command."""
-    if all(await get_membership_statuses(update.effective_user.id, context)):
-        return await command_handler(update, context)
+async def pre_command_check(update: Update, context: ContextTypes.DEFAULT_TYPE, command_handler, is_conv_entry: bool = False):
+    """Wrapper to check membership before executing a command. Skips check in group chats."""
+    # MODIFIED: Only check membership if in a private chat.
+    if update.effective_chat.type == ChatType.PRIVATE:
+        if all(await get_membership_statuses(update.effective_user.id, context)):
+            return await command_handler(update, context)
+        else:
+            await send_join_prompt(update, context)
+            return ConversationHandler.END if is_conv_entry else None
     else:
-        await send_join_prompt(update, context)
-        return ConversationHandler.END if 'conv' in str(command_handler) else None
+        # In group chats, bypass the membership check
+        return await command_handler(update, context)
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     """Logs errors and sends a user-friendly message."""
@@ -334,8 +345,8 @@ async def initialize_bot():
         
         conv_handler = ConversationHandler(
             entry_points=[
-                CommandHandler("reset", lambda u, c: pre_command_check(u, c, conversational_reset_start)),
-                CommandHandler("bulk_reset", lambda u, c: pre_command_check(u, c, conversational_bulk_start))
+                CommandHandler("reset", lambda u, c: pre_command_check(u, c, conversational_reset_start, is_conv_entry=True)),
+                CommandHandler("bulk_reset", lambda u, c: pre_command_check(u, c, conversational_bulk_start, is_conv_entry=True))
             ],
             states={
                 AWAITING_TARGET: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_single_target)],
