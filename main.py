@@ -24,6 +24,8 @@ import uvicorn
 from PIL import Image
 import io
 import json
+from contextlib import asynccontextmanager
+import re
 
 # =========================
 # Configuration
@@ -55,9 +57,6 @@ if not GEMINI_API_KEY:
 # Configure Gemini AI
 genai.configure(api_key=GEMINI_API_KEY)
 
-# Initialize FastAPI app
-app = FastAPI(title="Telegram Multi-Feature Bot")
-
 # Global variable for Telegram application
 application = None
 
@@ -67,7 +66,7 @@ user_conversations = {}
 # Conversation states
 MAIN_MENU, CHAT_MODE, OCR_MODE, SSHOT_MODE, INSTA_MODE = range(5)
 
-# Initialize Gemini model (using a more robust async-first approach)
+# Initialize Gemini model
 try:
     model = genai.GenerativeModel('gemini-1.5-flash')
     logger.info("Successfully initialized Gemini model")
@@ -79,10 +78,9 @@ except Exception as e:
 # Instagram Reset Feature (Optimized with Async HTTPX)
 # =========================
 
-async def send_password_reset(target: str) -> str:
+async def send_password_reset(target: str, client: httpx.AsyncClient) -> str:
     """
-    Send password reset request to Instagram using asynchronous httpx.
-    This version has the proxy information hardcoded directly into it.
+    Send a single password reset request using a shared httpx client.
     """
     try:
         data = {
@@ -93,49 +91,40 @@ async def send_password_reset(target: str) -> str:
         
         if '@' in target:
             data['user_email'] = target
-            log_msg = f"Attempting reset for email: {target}"
         elif target.isdigit():
             data['user_id'] = target
-            log_msg = f"Attempting reset for User ID: {target}"
         else:
             data['username'] = target
-            log_msg = f"Attempting reset for username: {target}"
-        logger.info(log_msg)
 
         headers = {
             'user-agent': f"Instagram 150.0.0.0.000 Android (29/10; 300dpi; 720x1440; {''.join(random.choices(string.ascii_lowercase + string.digits, k=16))}/{''.join(random.choices(string.ascii_lowercase + string.digits, k=16))}; {''.join(random.choices(string.ascii_lowercase + string.digits, k=16))}; {''.join(random.choices(string.ascii_lowercase + string.digits, k=16))}; en_GB;)"
         }
         
-        proxy_url = "http://bgibhytx:nhrg5qvjfqy7@142.111.48.253:7030/"
-        proxies = {'http://': proxy_url, 'https://': proxy_url}
-        
-        async with httpx.AsyncClient(proxies=proxies, timeout=30) as client:
-            response = await client.post(
-                'https://i.instagram.com/api/v1/accounts/send_password_reset/',
-                headers=headers,
-                data=data
-            )
+        response = await client.post(
+            'https://i.instagram.com/api/v1/accounts/send_password_reset/',
+            headers=headers,
+            data=data
+        )
         
         if response.status_code == 404:
-            return f"❌ *User Not Found!* The account `{target}` does not exist."
+            return f"❌ *User Not Found\\!* The account `{target}` does not exist."
         
         response_text = response.text
         if 'obfuscated_email' in response_text:
-            return f"✅ *Success!* Password reset link sent for: `{target}`"
+            return f"✅ *Success\\!* Password reset link sent for: `{target}`"
         else:
             try:
-                error_data = response.json()
-                error_message = error_data.get('message', response_text)
+                error_message = response.json().get('message', response_text)
                 return f"❌ *Failed* for: `{target}`\nReason: `{error_message}`"
             except json.JSONDecodeError:
                 return f"❌ *Failed* for: `{target}`\nRaw Error: `{response_text}`"
             
     except httpx.RequestError as e:
         logger.error(f"Network error during password reset for {target}: {e}")
-        return f"❌ *Network Error* for: `{target}`. Could not connect to Instagram."
+        return f"❌ *Network Error* for: `{target}`."
     except Exception as e:
         logger.error(f"Exception during password reset for {target}: {e}")
-        return f"❌ *Error* for: `{target}`\nException: `{str(e)}`"
+        return f"❌ *Error* for: `{target}`."
 
 # =========================
 # Image Processing (Optimized with Async Threading)
@@ -150,9 +139,7 @@ def compress_image_sync(image_bytes, max_size=(1024, 1024), quality=85):
         image.thumbnail(max_size, Image.Resampling.LANCZOS)
         output_buffer = io.BytesIO()
         image.save(output_buffer, format='JPEG', quality=quality, optimize=True)
-        compressed_bytes = output_buffer.getvalue()
-        logger.info(f"Image compressed from {len(image_bytes)} to {len(compressed_bytes)} bytes")
-        return compressed_bytes
+        return output_buffer.getvalue()
     except Exception as e:
         logger.error(f"Error compressing image: {e}")
         return image_bytes
@@ -170,27 +157,26 @@ async def process_image(update: Update, context: ContextTypes.DEFAULT_TYPE, mode
         
         prompt, result_title = "", ""
         if mode == OCR_MODE:
-            prompt = "Extract all the text from this image. Return only the extracted text without any additional commentary or formatting."
+            prompt = "Extract all text from this image. Return only the extracted text without any additional commentary."
             result_title = "📝 Extracted Text:"
         elif mode == SSHOT_MODE:
-            prompt = "Analyze this screenshot. Provide a brief overview, identify key elements, note any potential issues, and suggest solutions or best practices. Be specific and concise."
+            prompt = "Analyze this screenshot. Provide a brief overview, identify key elements, note potential issues, and suggest solutions."
             result_title = "📊 Screenshot Analysis:"
 
         response = await model.generate_content_async([prompt, image])
-        processed_text = response.text.strip()
         
-        if processed_text:
-            safe_text = html.escape(processed_text)
-            message_chunks = split_long_message(safe_text)
-            for i, chunk in enumerate(message_chunks):
+        if response.text.strip():
+            # Use the utility to escape markdown before sending
+            safe_text = escape_markdown(response.text.strip())
+            for i, chunk in enumerate(split_long_message(safe_text)):
                 full_chunk = f"*{result_title}*\n\n{chunk}" if i == 0 else chunk
-                await update.message.reply_text(full_chunk, parse_mode=ParseMode.MARKDOWN)
+                await update.message.reply_text(full_chunk, parse_mode=ParseMode.MARKDOWN_V2)
         else:
             await update.message.reply_text("❌ No text could be extracted or analyzed from the image.")
             
     except Exception as e:
         logger.error(f"Error in image processing (mode {mode}): {e}")
-        await update.message.reply_text("❌ Sorry, I encountered an error processing the image. Please try again.")
+        await update.message.reply_text("❌ Sorry, an error occurred while processing the image.")
     
     return mode
 
@@ -198,15 +184,20 @@ async def process_image(update: Update, context: ContextTypes.DEFAULT_TYPE, mode
 # Utility Functions
 # =========================
 
+def escape_markdown(text: str) -> str:
+    """Escapes special characters for Telegram MarkdownV2."""
+    escape_chars = r'_*[]()~`>#+-=|{}.!'
+    return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text)
+
 def split_long_message(text, max_length=4000):
-    """Split long messages into chunks to avoid Telegram message limits."""
+    """Split long messages into chunks."""
     if len(text) <= max_length: return [text]
     chunks = []
     while text:
         if len(text) <= max_length:
-            chunks.append(text)
-            break
-        split_index = text.rfind(' ', 0, max_length)
+            chunks.append(text); break
+        split_index = text.rfind('\n', 0, max_length)
+        if split_index == -1: split_index = text.rfind(' ', 0, max_length)
         if split_index == -1: split_index = max_length
         chunks.append(text[:split_index])
         text = text[split_index:].strip()
@@ -220,12 +211,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /start command - entry point to main menu."""
     try:
         user = update.effective_user
-        reply_keyboard = [
-            ["Instagram Reset"],
-            ["Chat Mode", "OCR Mode"],
-            ["Screenshot Mode", "Help"]
-        ]
-        welcome_message = (
+        reply_keyboard = [["Instagram Reset"], ["Chat Mode", "OCR Mode"], ["Screenshot Mode", "Help"]]
+        welcome_message = escape_markdown(
             f"Hello {user.first_name}!\n\n"
             "🤖 *MULTI-FEATURE BOT*\n\n"
             "🔓 *MAIN FEATURE: INSTAGRAM PASSWORD RESET*\n\n"
@@ -239,70 +226,54 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             welcome_message,
             reply_markup=ReplyKeyboardMarkup(reply_keyboard, resize_keyboard=True),
-            parse_mode=ParseMode.MARKDOWN
+            parse_mode=ParseMode.MARKDOWN_V2
         )
         return MAIN_MENU
     except Exception as e:
-        logger.error(f"Error in start command: {e}")
-        await update.message.reply_text("Welcome! Use the keyboard to select a mode.")
+        logger.error(f"Error in start_command: {e}")
+        await update.message.reply_text("Welcome! Please select a mode using the keyboard.")
         return MAIN_MENU
 
 async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle main menu selections."""
     mode_map = {
-        "Instagram Reset": switch_to_insta_mode,
-        "Chat Mode": switch_to_chat_mode,
-        "OCR Mode": switch_to_ocr_mode,
-        "Screenshot Mode": switch_to_sshot_mode,
+        "Instagram Reset": switch_to_insta_mode, "Chat Mode": switch_to_chat_mode,
+        "OCR Mode": switch_to_ocr_mode, "Screenshot Mode": switch_to_sshot_mode,
         "Help": help_command
     }
     handler = mode_map.get(update.message.text)
-    if handler:
-        return await handler(update, context)
-    else:
-        await update.message.reply_text("Please select a mode from the keyboard below:")
-        return MAIN_MENU
+    return await handler(update, context) if handler else MAIN_MENU
 
 # --- Mode Switching Handlers ---
 async def switch_to_insta_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
+    message = escape_markdown(
         "🔓 *INSTAGRAM RESET MODE ACTIVATED*\n\n"
-        "✨ Welcome to the Instagram Password Recovery Tool ✨\n\n"
         "🚀 *Available Commands:*\n"
         "`/rst username` - Reset by username\n"
         "`/rst email@gmail.com` - Reset by email\n"
         "`/rst 1234567890` - Reset by User ID\n"
-        "`/blk user1 user2` - Bulk reset (max 3 accounts)\n\n"
-        f"Use `/mode` to return to the menu.\n\nDeveloped by {DEV_HANDLE}",
-        reply_markup=ReplyKeyboardRemove(), parse_mode=ParseMode.MARKDOWN
+        "`/blk user1 user2` - Bulk reset (max 3)\n\n"
+        f"Use `/mode` to return to the menu.\n\nDeveloped by {DEV_HANDLE}"
     )
+    await update.message.reply_text(message, reply_markup=ReplyKeyboardRemove(), parse_mode=ParseMode.MARKDOWN_V2)
     return INSTA_MODE
 
 async def switch_to_chat_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "💬 *Switched to Chat Mode*\n\n"
-        "Now you can chat with me normally! Just send your messages and I'll respond.\n\n"
-        f"Use `/mode` to return to mode selection.\n\nDeveloped by {DEV_HANDLE}",
-        reply_markup=ReplyKeyboardRemove(), parse_mode=ParseMode.MARKDOWN
-    )
+    message = escape_markdown("💬 *Switched to Chat Mode*\n\nNow you can chat with me normally.\n\n"
+                              f"Use `/mode` to return to mode selection.\n\nDeveloped by {DEV_HANDLE}")
+    await update.message.reply_text(message, reply_markup=ReplyKeyboardRemove(), parse_mode=ParseMode.MARKDOWN_V2)
     return CHAT_MODE
 
 async def switch_to_ocr_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "📷 *Switched to OCR Mode*\n\n"
-        "Now send me images and I'll extract text from them!\n\n"
-        f"Use `/mode` to return to mode selection.\n\nDeveloped by {DEV_HANDLE}",
-        reply_markup=ReplyKeyboardRemove(), parse_mode=ParseMode.MARKDOWN
-    )
+    message = escape_markdown("📷 *Switched to OCR Mode*\n\nSend me an image and I'll extract text from it.\n\n"
+                              f"Use `/mode` to return to mode selection.\n\nDeveloped by {DEV_HANDLE}")
+    await update.message.reply_text(message, reply_markup=ReplyKeyboardRemove(), parse_mode=ParseMode.MARKDOWN_V2)
     return OCR_MODE
 
 async def switch_to_sshot_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "📱 *Switched to Screenshot Mode*\n\n"
-        "Now send me screenshots and I'll analyze them for issues and solutions!\n\n"
-        f"Use `/mode` to return to mode selection.\n\nDeveloped by {DEV_HANDLE}",
-        reply_markup=ReplyKeyboardRemove(), parse_mode=ParseMode.MARKDOWN
-    )
+    message = escape_markdown("📱 *Switched to Screenshot Mode*\n\nSend me a screenshot and I'll analyze it.\n\n"
+                              f"Use `/mode` to return to mode selection.\n\nDeveloped by {DEV_HANDLE}")
+    await update.message.reply_text(message, reply_markup=ReplyKeyboardRemove(), parse_mode=ParseMode.MARKDOWN_V2)
     return SSHOT_MODE
 
 async def mode_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -311,48 +282,55 @@ async def mode_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- Mode-Specific Handlers ---
 async def insta_reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("Usage: /rst <username | email | user_id>")
+        await update.message.reply_text(escape_markdown("Usage: /rst <username | email | user_id>"), parse_mode=ParseMode.MARKDOWN_V2)
         return INSTA_MODE
     target = context.args[0].strip()
     processing_msg = await update.message.reply_text(f"🔄 Processing reset for: `{target}`...", parse_mode=ParseMode.MARKDOWN)
-    result = await send_password_reset(target)
-    await processing_msg.edit_text(result, parse_mode=ParseMode.MARKDOWN)
+    
+    proxy_url = "http://bgibhytx:nhrg5qvjfqy7@142.111.48.253:7030/"
+    proxies = {'http://': proxy_url, 'https://': proxy_url}
+    async with httpx.AsyncClient(proxies=proxies, timeout=30) as client:
+        result = await send_password_reset(target, client)
+        
+    await processing_msg.edit_text(result, parse_mode=ParseMode.MARKDOWN_V2)
     return INSTA_MODE
 
 async def insta_bulk_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """OPTIMIZED: Runs all reset requests concurrently for maximum speed."""
     if not context.args:
-        await update.message.reply_text("Usage: /blk user1 user2 user3\nMax 3 accounts.")
+        await update.message.reply_text(escape_markdown("Usage: /blk user1 user2 user3\nMax 3 accounts."), parse_mode=ParseMode.MARKDOWN_V2)
         return INSTA_MODE
-    targets = [t.strip() for t in context.args[:3] if t.strip()]
-    processing_msg = await update.message.reply_text(f"🔄 Processing bulk reset for {len(targets)} accounts...")
-    results = []
-    for i, target in enumerate(targets, 1):
-        await asyncio.sleep(2)
-        result = await send_password_reset(target)
-        results.append(f"{i}. {result}")
-        progress_text = f"📊 *Bulk Progress: {i}/{len(targets)}*\n\n" + "\n".join(results)
-        try:
-            await processing_msg.edit_text(progress_text, parse_mode=ParseMode.MARKDOWN)
-        except Exception:
-            pass # Ignore if message not modified
-    final_text = "📊 *Bulk Reset Complete:*\n\n" + "\n".join(results)
-    await processing_msg.edit_text(final_text, parse_mode=ParseMode.MARKDOWN)
+        
+    targets = list(set([t.strip() for t in context.args[:3] if t.strip()])) # Use set to avoid duplicates
+    
+    processing_msg = await update.message.reply_text(f"🔄 Processing {len(targets)} accounts concurrently...")
+    
+    proxy_url = "http://bgibhytx:nhrg5qvjfqy7@142.111.48.253:7030/"
+    proxies = {'http://': proxy_url, 'https://': proxy_url}
+    async with httpx.AsyncClient(proxies=proxies, timeout=30) as client:
+        tasks = [send_password_reset(target, client) for target in targets]
+        results = await asyncio.gather(*tasks)
+        
+    final_text = "📊 *Bulk Reset Complete:*\n\n" + "\n".join(f"• {res}" for res in results)
+    await processing_msg.edit_text(escape_markdown(final_text), parse_mode=ParseMode.MARKDOWN_V2)
     return INSTA_MODE
 
 async def insta_mode_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🔓 *Instagram Reset Mode Active*\n\nPlease use a command like `/rst <username>` or `/blk <user1> ...`",
-        parse_mode=ParseMode.MARKDOWN
+        escape_markdown("🔓 *Instagram Reset Mode Active*\n\nPlease use a command like `/rst <username>` or `/blk <user1> ...`"),
+        parse_mode=ParseMode.MARKDOWN_V2
     )
     return INSTA_MODE
 
 async def chat_mode_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Optimized chat handler that reuses the chat session."""
     try:
         user_id = update.effective_user.id
         message_text = update.message.text
         if message_text.startswith('/'):
             await update.message.reply_text("Use /mode to switch modes or /newchat to clear history.")
             return CHAT_MODE
+        
         if user_id not in user_conversations:
             user_conversations[user_id] = model.start_chat(history=[])
         
@@ -389,23 +367,23 @@ async def sshot_mode_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 # --- Help, About, Error ---
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
+    message = escape_markdown(
         "🤖 *BOT HELP GUIDE*\n\n"
         "*/start* or */mode* - Go to the main menu.\n"
         "*/rst <target>* - Reset an Instagram account.\n"
         "*/blk <targets>* - Reset multiple IG accounts.\n"
         "*/newchat* - Clear conversation history.\n\n"
-        f"Developed by {DEV_HANDLE}",
-        parse_mode=ParseMode.MARKDOWN
+        f"Developed by {DEV_HANDLE}"
     )
+    await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN_V2)
 
 async def about_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
+    message = escape_markdown(
         "ℹ️ *ABOUT THIS BOT*\n\n"
         "This is a multi-feature bot powered by Google Gemini, FastAPI, and `python-telegram-bot`.\n\n"
-        f"*Developer:* {DEV_HANDLE}",
-        parse_mode=ParseMode.MARKDOWN
+        f"*Developer:* {DEV_HANDLE}"
     )
+    await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN_V2)
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Exception while handling an update: {context.error}", exc_info=context.error)
@@ -418,12 +396,9 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def setup_bot_commands(app: Application):
     commands = [
-        BotCommand("start", "Start bot & select mode"),
-        BotCommand("mode", "Return to mode selection"),
-        BotCommand("rst", "IG single account reset"),
-        BotCommand("blk", "IG bulk reset (max 3)"),
-        BotCommand("newchat", "Reset conversation history"),
-        BotCommand("help", "Get help guide"),
+        BotCommand("start", "Start bot & select mode"), BotCommand("mode", "Return to mode selection"),
+        BotCommand("rst", "IG single account reset"), BotCommand("blk", "IG bulk reset (max 3)"),
+        BotCommand("newchat", "Reset conversation history"), BotCommand("help", "Get help guide"),
         BotCommand("about", "About this bot"),
     ]
     await app.bot.set_my_commands(commands)
@@ -431,11 +406,11 @@ async def setup_bot_commands(app: Application):
 
 async def initialize_bot():
     global application
-    if not WEBHOOK_URL:
-        logger.error("WEBHOOK_URL environment variable is not set. Cannot initialize bot.")
-        return
+    if not WEBHOOK_URL: logger.error("WEBHOOK_URL not set."); return
     
-    application = Application.builder().token(TELEGRAM_TOKEN).request(HTTPXRequest()).build()
+    # OPTIMIZED: Configure connection pooling for faster Telegram API calls
+    request = HTTPXRequest(pool_limits=httpx.Limits(max_connections=10))
+    application = Application.builder().token(TELEGRAM_TOKEN).request(request).build()
     
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start_command)],
@@ -445,8 +420,7 @@ async def initialize_bot():
             OCR_MODE: [MessageHandler(filters.PHOTO | filters.TEXT, ocr_mode_handler)],
             SSHOT_MODE: [MessageHandler(filters.PHOTO | filters.TEXT, sshot_mode_handler)],
             INSTA_MODE: [
-                CommandHandler("rst", insta_reset_command),
-                CommandHandler("blk", insta_bulk_command),
+                CommandHandler("rst", insta_reset_command), CommandHandler("blk", insta_bulk_command),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, insta_mode_handler),
             ],
         },
@@ -464,16 +438,19 @@ async def initialize_bot():
     await application.start()
     
     full_webhook_url = f"{WEBHOOK_URL.rstrip('/')}/{TELEGRAM_TOKEN}"
-    await application.bot.set_webhook(full_webhook_url)
+    await application.bot.set_webhook(full_webhook_url, allowed_updates=Update.ALL_TYPES)
     logger.info(f"Webhook set to: {full_webhook_url}")
 
-@app.on_event("startup")
-async def startup_event():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # On startup
+    logger.info("Starting up FastAPI application and initializing bot...")
     asyncio.create_task(initialize_bot())
+    yield
+    # On shutdown
+    if application: logger.info("Shutting down Telegram application..."); await application.stop()
 
-@app.on_event("shutdown")
-async def shutdown_event():
-    if application: await application.stop()
+app = FastAPI(title="Telegram Multi-Feature Bot", lifespan=lifespan)
 
 @app.get("/", include_in_schema=False)
 async def health_check():
@@ -481,11 +458,8 @@ async def health_check():
 
 @app.post("/{token}")
 async def webhook_endpoint(token: str, request: Request):
-    if token != TELEGRAM_TOKEN:
-        return JSONResponse(content={"status": "invalid token"}, status_code=401)
-    if not application:
-        return JSONResponse(content={"status": "service unavailable"}, status_code=503)
-    
+    if token != TELEGRAM_TOKEN: return JSONResponse(content={"status": "invalid token"}, status_code=401)
+    if not application: return JSONResponse(content={"status": "service unavailable"}, status_code=503)
     try:
         data = await request.json()
         update = Update.de_json(data, application.bot)
