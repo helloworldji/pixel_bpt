@@ -71,27 +71,40 @@ async def check_membership(user_id: int, channel_id: str, context: ContextTypes.
         logger.warning(f"Could not check membership for user {user_id} in channel {channel_id}: {e}")
         return False
 
-async def has_joined_all(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Checks if a user has joined all required channels concurrently."""
+async def get_membership_statuses(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> List[bool]:
+    """Checks all channels and returns a list of boolean statuses."""
     tasks = [check_membership(user_id, channel['id'], context) for channel in CHANNELS]
-    results = await asyncio.gather(*tasks)
-    return all(results)
+    return await asyncio.gather(*tasks)
 
-async def send_join_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Sends the force-join message with inline keyboard."""
+def create_join_keyboard() -> InlineKeyboardMarkup:
+    """Creates the keyboard with channel links and a verification button."""
     keyboard = []
     for channel in CHANNELS:
         keyboard.append([InlineKeyboardButton(channel['name'], url=channel['link'])])
     keyboard.append([InlineKeyboardButton("✅ I Have Joined All", callback_data="check_joined")])
+    return InlineKeyboardMarkup(keyboard)
+
+async def send_join_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE, statuses: List[bool] = None):
+    """Sends or edits the force-join message, showing a checklist if statuses are provided."""
+    message_text = "🚫 ACCESS DENIED\n\n"
     
-    markup = InlineKeyboardMarkup(keyboard)
+    if statuses:
+        message_text += "Your membership status:\n"
+        for i, channel in enumerate(CHANNELS):
+            icon = "✅" if statuses[i] else "❌"
+            message_text += f"{icon} {channel['name']}\n"
+        message_text += "\nPlease make sure you have joined all channels marked with ❌ and try again."
+    else:
+        message_text += "You must join all our channels and groups to use this bot.\n\n"
+        message_text += "Join all channels below, then click the button to verify."
+
+    markup = create_join_keyboard()
     
-    await update.message.reply_text(
-        "🚫 ACCESS DENIED\n\n"
-        "You must join all our channels and groups to use this bot.\n\n"
-        "Join all channels below, then click the button to verify.",
-        reply_markup=markup
-    )
+    # If called from a button press (CallbackQuery), edit the message. Otherwise, send a new one.
+    if update.callback_query:
+        await update.callback_query.edit_message_text(message_text, reply_markup=markup)
+    else:
+        await update.message.reply_text(message_text, reply_markup=markup)
 
 # =========================
 # Instagram Reset Core Logic (Optimized & Async)
@@ -117,12 +130,10 @@ async def send_reset_email_async(target: str, client: httpx.AsyncClient) -> str:
 async def send_reset_advanced_async(target: str, client: httpx.AsyncClient) -> str:
     """Method 2: Gets user ID and uses the mobile API endpoint."""
     try:
-        # First, get the user ID from the web profile
         profile_url = f"https://www.instagram.com/api/v1/users/web_profile_info/?username={target}"
         profile_res = await client.get(profile_url, headers={'X-IG-App-ID': '936619743392459'})
         user_id = profile_res.json()['data']['user']['id']
         
-        # Then, use the user ID to send the reset link
         reset_url = 'https://i.instagram.com/api/v1/accounts/send_password_reset/'
         headers = {'User-Agent': 'Instagram 6.12.1 Android (30/11; 480dpi; 1080x2004; HONOR; ANY-LX2; HNANY-Q1; qcom; ar_EG_#u-nu-arab)'}
         data = {'user_id': user_id, 'device_id': str(uuid.uuid4())}
@@ -172,7 +183,8 @@ async def process_target_concurrently(target: str) -> str:
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles /start command. Checks membership and shows appropriate message."""
-    if await has_joined_all(update.effective_user.id, context):
+    statuses = await get_membership_statuses(update.effective_user.id, context)
+    if all(statuses):
         await show_main_menu(update, context)
     else:
         await send_join_prompt(update, context)
@@ -180,12 +192,18 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def check_joined_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles the 'I Have Joined All' button press."""
     query = update.callback_query
-    await query.answer()
-    if await has_joined_all(query.from_user.id, context):
-        await query.edit_message_text("✅ Welcome! You can now use the bot.")
+    user_id = query.from_user.id
+    
+    statuses = await get_membership_statuses(user_id, context)
+    
+    if all(statuses):
+        await query.answer("✅ Verification successful!")
+        await query.edit_message_text("Welcome! You can now use the bot.")
         await show_main_menu(update, context)
     else:
-        await query.answer("❌ You haven't joined all the required channels yet. Please join them and try again.", show_alert=True)
+        # FIXED: Send the pop-up alert AND edit the message to show the detailed checklist.
+        await query.answer("❌ You haven't joined all channels. Check the list.", show_alert=True)
+        await send_join_prompt(update, context, statuses=statuses)
 
 async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Displays the main menu keyboard."""
@@ -193,17 +211,12 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [KeyboardButton("/reset")], [KeyboardButton("/bulk_reset")], [KeyboardButton("/help")]
     ], resize_keyboard=True)
     
-    # Determine the correct message object to use
     message_obj = update.message or update.callback_query.message
+    await message_obj.reply_text("Bot Menu:\nSelect a command to proceed.", reply_markup=markup)
 
-    await message_obj.reply_text(
-        "Bot Menu:\nSelect a command to proceed.",
-        reply_markup=markup
-    )
-
-async def help_command(message: Update, context: ContextTypes.DEFAULT_TYPE):
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Shows the help message."""
-    await message.message.reply_text(
+    await update.message.reply_text(
         "Help Guide\n\n"
         "/reset - Start the process to reset a single account.\n"
         "/bulk_reset - Start the process to reset multiple accounts.\n"
@@ -219,10 +232,7 @@ async def bulk_reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     """Asks for targets for a bulk reset."""
     await update.message.reply_text(
         "📝 Enter multiple Instagram usernames/emails (one per line, max 10):\n\n"
-        "Example:\n"
-        "username1\n"
-        "email@gmail.com\n"
-        "username2"
+        "Example:\nusername1\nemail@gmail.com\nusername2"
     )
     return AWAITING_BULK
 
@@ -265,11 +275,13 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def pre_command_check(update: Update, context: ContextTypes.DEFAULT_TYPE, command_handler):
     """Wrapper to check membership before executing a command."""
-    if await has_joined_all(update.effective_user.id, context):
+    if await get_membership_statuses(update.effective_user.id, context):
         return await command_handler(update, context)
     else:
         await send_join_prompt(update, context)
-        return ConversationHandler.END
+        # For conversation handler, we must return its END state if the check fails.
+        return ConversationHandler.END if isinstance(context.handler, ConversationHandler) else None
+
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Update {update} caused error: {context.error}", exc_info=context.error)
