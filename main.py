@@ -22,7 +22,7 @@ import io
 import json
 from contextlib import asynccontextmanager
 import qrcode
-from typing import Tuple, Dict, Optional
+from typing import Tuple
 
 # =========================
 # Configuration
@@ -56,8 +56,8 @@ MAIN_MENU, INSTA_MODE = range(2)
 # Core Features
 # =========================
 
-# FIXED: This function now accepts the proxies dictionary directly to pass to the post method.
-async def send_password_reset(target: str, client: httpx.AsyncClient, proxies: Optional[Dict[str, str]]) -> Tuple[bool, str]:
+# FIXED: This function no longer needs the 'proxies' argument as it's handled by the client.
+async def send_password_reset(target: str, client: httpx.AsyncClient) -> Tuple[bool, str]:
     """Sends a password reset request and returns a status tuple."""
     try:
         data = {'guid': str(uuid.uuid4()), 'device_id': str(uuid.uuid4())}
@@ -67,8 +67,8 @@ async def send_password_reset(target: str, client: httpx.AsyncClient, proxies: O
 
         headers = {'user-agent': f"Instagram 150.0.0.0.000 Android (29/10; 300dpi; 720x1440; {''.join(random.choices(string.ascii_lowercase + string.digits, k=16))}/{''.join(random.choices(string.ascii_lowercase + string.digits, k=16))}; {''.join(random.choices(string.ascii_lowercase + string.digits, k=16))}; {''.join(random.choices(string.ascii_lowercase + string.digits, k=16))}; en_GB;)"}
         
-        # FIXED: Proxies are now passed to the request method, not the client constructor.
-        response = await client.post('https://i.instagram.com/api/v1/accounts/send_password_reset/', headers=headers, data=data, proxies=proxies)
+        # FIXED: The 'proxies' argument is removed from the .post() call.
+        response = await client.post('https://i.instagram.com/api/v1/accounts/send_password_reset/', headers=headers, data=data)
         
         if response.status_code == 404:
             return False, f"User Not Found: The account '{target}' does not exist."
@@ -163,10 +163,9 @@ async def insta_reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     proxy_url = "http://bgibhytx:nhrg5qvjfqy7@142.111.48.253:7030/"
     proxies = {'http://': proxy_url, 'https://': proxy_url}
     
-    # FIXED: The client is now initialized without the 'proxies' argument.
-    async with httpx.AsyncClient(timeout=30) as client:
-        # FIXED: The proxies dictionary is passed here instead.
-        success, message = await send_password_reset(target, client, proxies)
+    # FIXED: The 'proxies' argument is now correctly passed to the AsyncClient constructor.
+    async with httpx.AsyncClient(proxies=proxies, timeout=30) as client:
+        success, message = await send_password_reset(target, client)
     
     icon = "✅" if success else "❌"
     formatted_message = f"{icon} {message}"
@@ -185,10 +184,9 @@ async def insta_bulk_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     proxy_url = "http://bgibhytx:nhrg5qvjfqy7@142.111.48.253:7030/"
     proxies = {'http://': proxy_url, 'https://': proxy_url}
 
-    # FIXED: The client is now initialized without the 'proxies' argument.
-    async with httpx.AsyncClient(timeout=30) as client:
-        # FIXED: The proxies dictionary is passed into the send_password_reset function.
-        tasks = [send_password_reset(target, client, proxies) for target in targets]
+    # FIXED: The 'proxies' argument is now correctly passed to the AsyncClient constructor.
+    async with httpx.AsyncClient(proxies=proxies, timeout=30) as client:
+        tasks = [send_password_reset(target, client) for target in targets]
         results = await asyncio.gather(*tasks)
     
     formatted_results = []
