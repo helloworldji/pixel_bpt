@@ -5,23 +5,22 @@ import uuid
 import httpx
 import re
 import json
-from telegram import Update, BotCommand, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram import Update, BotCommand, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.constants import ChatType
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
     ContextTypes,
-    ConversationHandler,
     CallbackQueryHandler,
     filters
 )
 from telegram.error import BadRequest
-from fastapi import FastAPI, Request, status
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 import uvicorn
 from contextlib import asynccontextmanager
-from typing import Tuple, List
+from typing import List
 
 # =========================
 # Configuration
@@ -55,9 +54,6 @@ if not TELEGRAM_TOKEN:
 # Global variables
 application = None
 bot_status = {"initialized": False, "webhook_verified": False, "error": None, "details": {}}
-
-# Conversation states
-AWAITING_TARGET, AWAITING_BULK = range(2)
 
 # =========================
 # Force Join Logic
@@ -164,17 +160,17 @@ async def process_target_concurrently(target: str) -> bool:
 # =========================
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles /start command. Checks membership only in private chats."""
+    """
+    Handles /start command. In private chats, it checks membership and shows the main menu.
+    In group chats, it does nothing to prevent spam.
+    """
     if update.effective_chat.type == ChatType.PRIVATE:
         statuses = await get_membership_statuses(update.effective_user.id, context)
         if all(statuses):
             await show_main_menu(update, context)
         else:
             await send_join_prompt(update, context, statuses=statuses)
-    else:
-        # In a group chat, bypass the check.
-        await show_main_menu(update, context)
-
+    # In a group chat, the bot will not respond to /start to avoid clutter.
 
 async def check_joined_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles the 'I Have Joined All' button press."""
@@ -185,7 +181,7 @@ async def check_joined_callback(update: Update, context: ContextTypes.DEFAULT_TY
     
     if all(statuses):
         await query.answer("✅ Verification successful!", show_alert=True)
-        await query.edit_message_text("Welcome! You can now use the bot's commands.")
+        await query.edit_message_text("Welcome! You can now use the bot.")
         await show_main_menu(update, context)
     else:
         await query.answer("❌ You haven't joined all channels. Check the list below.", show_alert=True)
@@ -195,30 +191,31 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Displays the main menu message."""
     message_obj = update.message or update.callback_query.message
     await message_obj.reply_text(
-        "Welcome! Use the commands to get started:\n\n"
-        "Guided Mode:\n"
-        "/reset - Start a guided reset for one account.\n"
-        "/bulk_reset - Start a guided reset for multiple accounts.\n\n"
-        "Direct Mode (Faster):\n"
-        "/rst <username> - Reset a single account instantly.\n"
-        "/blk <user1> <user2>... - Reset multiple accounts instantly.\n\n"
-        "/help - Show help guide."
+        "Welcome!\n\n"
+        "Please use the commands to interact with the bot:\n\n"
+        "🔹 /rst <username> - Reset a single account.\n"
+        "🔹 /blk <user1> <user2>... - Reset multiple accounts.\n\n"
+        "For more information, use /help."
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Shows the help message."""
     await update.message.reply_text(
         "Help Guide\n\n"
-        "Use /reset or /bulk_reset for a step-by-step process.\n\n"
-        "Use /rst <username> or /blk <user1> ... for a faster, direct command."
+        "This bot helps you send password reset links to Instagram accounts. It only responds to direct commands.\n\n"
+        "COMMANDS:\n\n"
+        "🔹 Single Reset:\n"
+        "   Use the command `/rst` followed by a username.\n"
+        "   Example: `/rst example.user`\n\n"
+        "🔹 Bulk Reset (Max 10):\n"
+        "   Use the command `/blk` followed by usernames separated by spaces.\n"
+        "   Example: `/blk user1 user2 user3`"
     )
     
-# --- Direct Command Handlers ---
-
 async def direct_reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles the /rst command with arguments."""
     if not context.args:
-        await update.message.reply_text("Usage: /rst <username_or_email>")
+        await update.message.reply_text("Usage: /rst <username_or_email>\nExample: `/rst example.user`")
         return
 
     target = context.args[0].strip()
@@ -235,7 +232,7 @@ async def direct_bulk_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     """Handles the /blk command with arguments."""
     targets = [t.strip() for t in context.args if t.strip()][:10]
     if not targets:
-        await update.message.reply_text("Usage: /blk <user1> <user2> ...")
+        await update.message.reply_text("Usage: /blk <user1> <user2> ...\nExample: `/blk user1 user2`")
         return
 
     await update.message.reply_text(f"⏳ Processing {len(targets)} targets concurrently...")
@@ -251,71 +248,18 @@ async def direct_bulk_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     await update.message.reply_text("\n".join(final_report))
 
-# --- Conversational Handlers ---
-
-async def conversational_reset_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Asks for the target for a single reset in a conversation."""
-    await update.message.reply_text("🔑 Enter the Instagram username or email:", reply_markup=ReplyKeyboardRemove())
-    return AWAITING_TARGET
-
-async def conversational_bulk_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Asks for targets for a bulk reset in a conversation."""
-    await update.message.reply_text(
-        "📝 Enter multiple Instagram usernames/emails (one per line, max 10):",
-        reply_markup=ReplyKeyboardRemove()
-    )
-    return AWAITING_BULK
-
-async def handle_single_target(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Processes the single target provided in the conversation."""
-    target = update.message.text.strip()
-    await update.message.reply_text(f"⏳ Processing {target}...")
-    success = await process_target_concurrently(target)
-    icon = "✅" if success else "❌"
-    status_text = "Reset link sent" if success else "Failed to send reset link"
-    await update.message.reply_text(f"{icon} {status_text} for {target}.")
-    await show_main_menu(update, context)
-    return ConversationHandler.END
-
-async def handle_bulk_targets(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Processes the bulk targets provided in the conversation."""
-    targets = [t.strip() for t in update.message.text.strip().split('\n') if t.strip()][:10]
-    if not targets:
-        await update.message.reply_text("No valid targets provided. Please try again.")
-        return AWAITING_BULK
-
-    await update.message.reply_text(f"⏳ Processing {len(targets)} targets concurrently...")
-    tasks = [process_target_concurrently(target) for target in targets]
-    all_results = await asyncio.gather(*tasks)
-    
-    final_report = ["📊 Bulk Reset Complete:"]
-    for target, result in zip(targets, all_results):
-        icon = "✅" if result else "❌"
-        status_text = "Reset link sent" if result else "Failed"
-        final_report.append(f"{icon} {target} - {status_text}")
-    
-    await update.message.reply_text("\n\n---\n\n".join(final_report))
-    await show_main_menu(update, context)
-    return ConversationHandler.END
-
-async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Cancels the current operation."""
-    await update.message.reply_text("Operation cancelled.", reply_markup=ReplyKeyboardRemove())
-    await show_main_menu(update, context)
-    return ConversationHandler.END
-
-
-async def pre_command_check(update: Update, context: ContextTypes.DEFAULT_TYPE, command_handler, is_conv_entry: bool = False):
+async def pre_command_check(update: Update, context: ContextTypes.DEFAULT_TYPE, command_handler):
     """Wrapper to check membership before executing a command. Skips check in group chats."""
-    if update.effective_chat.type == ChatType.PRIVATE:
-        if all(await get_membership_statuses(update.effective_user.id, context)):
-            return await command_handler(update, context)
-        else:
-            await send_join_prompt(update, context)
-            return ConversationHandler.END if is_conv_entry else None
-    else:
-        # In group chats, bypass the membership check
+    # In groups, anyone can use commands. The check is bypassed.
+    if update.effective_chat.type != ChatType.PRIVATE:
         return await command_handler(update, context)
+
+    # In private chats, membership is required.
+    if all(await get_membership_statuses(update.effective_user.id, context)):
+        return await command_handler(update, context)
+    else:
+        await send_join_prompt(update, context)
+        return None
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     """Logs errors and sends a user-friendly message."""
@@ -342,36 +286,24 @@ async def initialize_bot():
     try:
         application = Application.builder().token(TELEGRAM_TOKEN).build()
         
-        conv_handler = ConversationHandler(
-            entry_points=[
-                CommandHandler("reset", lambda u, c: pre_command_check(u, c, conversational_reset_start, is_conv_entry=True)),
-                CommandHandler("bulk_reset", lambda u, c: pre_command_check(u, c, conversational_bulk_start, is_conv_entry=True))
-            ],
-            states={
-                AWAITING_TARGET: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_single_target)],
-                AWAITING_BULK: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_bulk_targets)],
-            },
-            fallbacks=[CommandHandler("cancel", cancel_command)],
-        )
-        
-        application.add_handler(CommandHandler("start", start_command))
+        # Core command handlers
+        application.add_handler(CommandHandler("start", start_command)) # This now only works effectively in private chat
         application.add_handler(CallbackQueryHandler(check_joined_callback, pattern="^check_joined$"))
-        application.add_handler(conv_handler)
         application.add_handler(CommandHandler("rst", lambda u, c: pre_command_check(u, c, direct_reset_command)))
         application.add_handler(CommandHandler("blk", lambda u, c: pre_command_check(u, c, direct_bulk_command)))
         application.add_handler(CommandHandler("help", lambda u, c: pre_command_check(u, c, help_command)))
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, start_command))
+        
+        # The handler for general text messages has been removed to stop the bot from replying to everything.
+        
         application.add_error_handler(error_handler)
         
         await application.initialize()
         await application.start()
         
         await application.bot.set_my_commands([
-            BotCommand("start", "Start the bot"),
-            BotCommand("reset", "Guided IG reset"),
-            BotCommand("rst", "Direct IG reset"),
-            BotCommand("bulk_reset", "Guided bulk IG reset"),
-            BotCommand("blk", "Direct bulk IG reset"),
+            BotCommand("start", "Start the bot (in private chat)"),
+            BotCommand("rst", "Reset a single IG account"),
+            BotCommand("blk", "Reset multiple IG accounts"),
             BotCommand("help", "Get help"),
         ])
         
