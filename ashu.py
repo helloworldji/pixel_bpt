@@ -4,7 +4,6 @@ import os
 from datetime import datetime
 from flask import Flask, request
 import telebot
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 # Configure logging
 logging.basicConfig(
@@ -16,7 +15,6 @@ logger = logging.getLogger(__name__)
 # Bot configuration
 BOT_TOKEN = "8256075803:AAEBqIpIC514IcY-9HptJyAJA4XIdP8CDog"
 ADMIN_IDS = [8275649347, 8175884349]
-FORCE_SUB_CHANNEL = "@thebosssquad"
 PORT = int(os.environ.get('PORT', 10000))
 WEBHOOK_URL = os.environ.get('RENDER_EXTERNAL_URL', '')
 
@@ -63,76 +61,38 @@ class BotStats:
 
 stats = BotStats()
 
-def check_subscription(user_id: int) -> bool:
-    """Check if user is subscribed to the channel"""
-    try:
-        member = bot.get_chat_member(FORCE_SUB_CHANNEL, user_id)
-        return member.status in ['member', 'administrator', 'creator']
-    except Exception as e:
-        logger.error(f"Subscription check error: {e}")
-        return True
-
-def get_subscription_keyboard():
-    """Create subscription keyboard"""
-    keyboard = InlineKeyboardMarkup()
-    keyboard.row(InlineKeyboardButton("📢 Join Channel", url=f"https://t.me/{FORCE_SUB_CHANNEL[1:]}"))
-    keyboard.row(InlineKeyboardButton("✅ I've Joined", callback_data="check_sub"))
-    return keyboard
-
 @bot.message_handler(commands=['start'])
 def start_command(message):
     """Handle /start command"""
-    user_id = message.from_user.id
-    
-    if not check_subscription(user_id):
-        bot.reply_to(
-            message,
-            "❌ <b>Please join our channel first!</b>\n\n"
-            "Join the channel below and click 'I've Joined' to continue.",
-            reply_markup=get_subscription_keyboard()
-        )
-        return
-    
     welcome_text = (
         "👋 <b>Welcome to Fast Reset Bot!</b>\n\n"
         "🚀 <b>Commands:</b>\n"
         "• <code>/rst @username</code> - Reset a user\n"
         "• <code>/help</code> - Show help\n"
-        "• <code>/start</code> - Start bot\n\n"
+        "• <code>/ping</code> - Test bot speed\n\n"
         "⚡ <b>Features:</b>\n"
         "• Ultra-fast response (<0.3s)\n"
         "• Works in groups and channels\n"
         "• Simple and efficient\n\n"
         "Made with ❤️"
     )
-    
     bot.reply_to(message, welcome_text)
 
 @bot.message_handler(commands=['help'])
 def help_command(message):
     """Handle /help command"""
-    user_id = message.from_user.id
-    
-    if message.chat.type == "private":
-        if not check_subscription(user_id):
-            bot.reply_to(
-                message,
-                "❌ Please join our channel first!",
-                reply_markup=get_subscription_keyboard()
-            )
-            return
-    
     help_text = (
         "📚 <b>Bot Help</b>\n\n"
         "<b>How to use:</b>\n"
         "Send <code>/rst @username</code> to reset someone\n\n"
         "<b>Where it works:</b>\n"
         "• Private chat with bot\n"
-        "• Groups (bot must be admin)\n"
-        "• Channels (bot must be admin)\n\n"
-        "<b>Note:</b> One reset at a time!"
+        "• Groups\n"
+        "• Channels\n\n"
+        "<b>Example:</b>\n"
+        "<code>/rst @username</code>\n\n"
+        "<b>Note:</b> Super fast and simple!"
     )
-    
     bot.reply_to(message, help_text)
 
 @bot.message_handler(commands=['stat'])
@@ -164,17 +124,9 @@ def reset_command(message):
     start_time = datetime.now()
     user_id = message.from_user.id
     
+    # Cooldown check
     if not stats.can_use(user_id):
         return
-    
-    if message.chat.type == "private":
-        if not check_subscription(user_id):
-            bot.reply_to(
-                message,
-                "❌ Please join our channel first!",
-                reply_markup=get_subscription_keyboard()
-            )
-            return
     
     # Parse command
     parts = message.text.split()
@@ -184,6 +136,7 @@ def reset_command(message):
     
     target = parts[1]
     
+    # Validate username
     if not target.startswith("@"):
         bot.reply_to(message, "❌ <b>Please provide a valid username starting with @</b>")
         return
@@ -203,7 +156,7 @@ def reset_command(message):
     stats.increment_resets()
     
     response_time = (datetime.now() - start_time).total_seconds()
-    logger.info(f"Reset processed in {response_time:.3f}s")
+    logger.info(f"Reset processed in {response_time:.3f}s for user {user_id}")
 
 @bot.message_handler(commands=['ping'])
 def ping_command(message):
@@ -217,26 +170,6 @@ def ping_command(message):
         sent.chat.id,
         sent.message_id
     )
-
-@bot.callback_query_handler(func=lambda call: call.data == "check_sub")
-def check_subscription_callback(call):
-    """Handle subscription check callback"""
-    user_id = call.from_user.id
-    
-    if check_subscription(user_id):
-        bot.edit_message_text(
-            "✅ <b>Thank you for joining!</b>\n\n"
-            "You can now use all bot features.\n"
-            "Send /help to see available commands.",
-            call.message.chat.id,
-            call.message.message_id
-        )
-    else:
-        bot.answer_callback_query(
-            call.id,
-            "❌ You haven't joined the channel yet!",
-            show_alert=True
-        )
 
 # Flask routes
 @app.route('/')
@@ -263,8 +196,9 @@ if __name__ == '__main__':
     bot.set_webhook(url=webhook_url)
     
     logger.info("🚀 Bot started successfully!")
-    logger.info(f"📡 Webhook set to: {webhook_url}")
+    logger.info(f"📡 Webhook: {webhook_url}")
     logger.info(f"✅ Authorized users: {len(ADMIN_IDS)}")
+    logger.info("⚡ No force join required - All users can access!")
     
     # Start Flask app
     app.run(host='0.0.0.0', port=PORT)
