@@ -2,6 +2,7 @@ import logging
 import json
 import os
 from datetime import datetime
+from flask import Flask, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -21,6 +22,11 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = "8256075803:AAEBqIpIC514IcY-9HptJyAJA4XIdP8CDog"
 ADMIN_IDS = [8275649347, 8175884349]
 FORCE_SUB_CHANNEL = "@thebosssquad"
+PORT = int(os.environ.get('PORT', 10000))
+WEBHOOK_URL = os.environ.get('RENDER_EXTERNAL_URL', '')
+
+# Flask app
+app = Flask(__name__)
 
 # Stats tracking
 class BotStats:
@@ -82,7 +88,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /start command"""
     user = update.effective_user
     
-    # Check subscription
     if not await check_subscription(user.id, context):
         await update.message.reply_html(
             "❌ <b>Please join our channel first!</b>\n\n"
@@ -110,7 +115,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /help command"""
     user = update.effective_user
     
-    # Check subscription for private chats
     if update.effective_chat.type == "private":
         if not await check_subscription(user.id, context):
             await update.message.reply_html(
@@ -159,11 +163,9 @@ async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     start_time = datetime.now()
     user = update.effective_user
     
-    # Cooldown check
     if not stats.can_use(user.id):
         return
     
-    # Subscription check for private chats
     if update.effective_chat.type == "private":
         if not await check_subscription(user.id, context):
             await update.message.reply_html(
@@ -172,19 +174,16 @@ async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
     
-    # Parse command
     if not context.args or len(context.args) < 1:
         await update.message.reply_html("❌ <b>Usage:</b> <code>/rst @username</code>")
         return
     
     target = context.args[0]
     
-    # Validate username
     if not target.startswith("@"):
         await update.message.reply_html("❌ <b>Please provide a valid username starting with @</b>")
         return
     
-    # Prepare reset message
     if update.effective_chat.type in ["group", "supergroup", "channel"]:
         sender_link = f'<a href="tg://user?id={user.id}">{user.first_name}</a>'
         reset_text = (
@@ -196,11 +195,8 @@ async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reset_text = f"✅ <b>Reset successful!</b>\n\n👤 <b>Target:</b> {target}"
     
     await update.message.reply_html(reset_text)
-    
-    # Update stats
     stats.increment_resets()
     
-    # Log response time
     response_time = (datetime.now() - start_time).total_seconds()
     logger.info(f"Reset processed in {response_time:.3f}s")
 
@@ -236,28 +232,50 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle errors"""
     logger.error(f"Update {update} caused error {context.error}")
 
-def main():
-    """Start the bot"""
-    # Create application
-    application = Application.builder().token(BOT_TOKEN).build()
-    
-    # Add handlers
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("stat", stat_command))
-    application.add_handler(CommandHandler("rst", reset_command))
-    application.add_handler(CommandHandler("ping", ping_command))
-    application.add_handler(CallbackQueryHandler(check_subscription_callback, pattern="^check_sub$"))
-    
-    # Add error handler
-    application.add_error_handler(error_handler)
-    
-    # Start bot
-    logger.info("🚀 Bot started successfully!")
-    logger.info(f"✅ Authorized users: {len(ADMIN_IDS)}")
-    
-    # Run the bot
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+# Initialize bot application
+application = Application.builder().token(BOT_TOKEN).build()
+
+# Add handlers
+application.add_handler(CommandHandler("start", start))
+application.add_handler(CommandHandler("help", help_command))
+application.add_handler(CommandHandler("stat", stat_command))
+application.add_handler(CommandHandler("rst", reset_command))
+application.add_handler(CommandHandler("ping", ping_command))
+application.add_handler(CallbackQueryHandler(check_subscription_callback, pattern="^check_sub$"))
+application.add_error_handler(error_handler)
+
+@app.route('/')
+def index():
+    """Health check endpoint for UptimeRobot"""
+    return "Bot is running! 🚀", 200
+
+@app.route('/webhook', methods=['POST'])
+async def webhook():
+    """Handle webhook updates"""
+    try:
+        update = Update.de_json(request.get_json(force=True), application.bot)
+        await application.process_update(update)
+        return "OK", 200
+    except Exception as e:
+        logger.error(f"Webhook error: {e}")
+        return "Error", 500
 
 if __name__ == '__main__':
-    main()
+    import asyncio
+    from threading import Thread
+    
+    async def setup_webhook():
+        """Setup webhook"""
+        webhook_url = f"{WEBHOOK_URL}/webhook"
+        await application.bot.set_webhook(url=webhook_url)
+        logger.info(f"🚀 Webhook set to: {webhook_url}")
+        logger.info(f"✅ Bot is running on port {PORT}")
+        logger.info(f"✅ Authorized users: {len(ADMIN_IDS)}")
+    
+    # Run webhook setup
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(setup_webhook())
+    
+    # Start Flask app
+    app.run(host='0.0.0.0', port=PORT)
