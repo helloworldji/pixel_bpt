@@ -1,10 +1,2 @@
-python-telegram-bot>=20.0
-google-generativeai>=0.3.0
-fastapi>=0.104.0
-uvicorn>=0.24.0
-pillow>=10.0.0
-httpx>=0.24.0
-python-multipart>=0.0.6
-qrcode[pil]
-fpdf2 
-python-dotenv
+aiogram==3.3.0
+aiofiles==23.2.1
