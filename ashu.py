@@ -8,10 +8,7 @@ from telegram.ext import (
     CommandHandler,
     CallbackQueryHandler,
     ContextTypes,
-    MessageHandler,
-    filters
 )
-from telegram.error import TelegramError
 
 # Configure logging
 logging.basicConfig(
