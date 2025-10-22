@@ -19,7 +19,7 @@ PORT = int(os.environ.get('PORT', 10000))
 WEBHOOK_URL = os.environ.get('RENDER_EXTERNAL_URL', '')
 
 # Initialize bot and Flask
-bot = telebot.TeleBot(BOT_TOKEN, parse_mode='HTML')
+bot = telebot.TeleBot(BOT_TOKEN, parse_mode='HTML', threaded=False)
 app = Flask(__name__)
 
 # Stats tracking
@@ -36,6 +36,7 @@ class BotStats:
                 with open("stats.json", "r") as f:
                     data = json.load(f)
                     self.total_resets = data.get("total_resets", 0)
+                    logger.info(f"Loaded stats: {self.total_resets} total resets")
         except Exception as e:
             logger.error(f"Error loading stats: {e}")
     
@@ -64,6 +65,7 @@ stats = BotStats()
 @bot.message_handler(commands=['start'])
 def start_command(message):
     """Handle /start command"""
+    logger.info(f"Start command from user {message.from_user.id}")
     welcome_text = (
         "👋 <b>Welcome to Fast Reset Bot!</b>\n\n"
         "🚀 <b>Commands:</b>\n"
@@ -81,6 +83,7 @@ def start_command(message):
 @bot.message_handler(commands=['help'])
 def help_command(message):
     """Handle /help command"""
+    logger.info(f"Help command from user {message.from_user.id}")
     help_text = (
         "📚 <b>Bot Help</b>\n\n"
         "<b>How to use:</b>\n"
@@ -99,6 +102,7 @@ def help_command(message):
 def stat_command(message):
     """Handle /stat command (owners only)"""
     user_id = message.from_user.id
+    logger.info(f"Stat command from user {user_id}")
     
     if user_id not in ADMIN_IDS:
         bot.reply_to(message, "❌ This command is not available!")
@@ -124,8 +128,11 @@ def reset_command(message):
     start_time = datetime.now()
     user_id = message.from_user.id
     
+    logger.info(f"Reset command from user {user_id}: {message.text}")
+    
     # Cooldown check
     if not stats.can_use(user_id):
+        logger.info(f"User {user_id} hit cooldown")
         return
     
     # Parse command
@@ -161,15 +168,19 @@ def reset_command(message):
 @bot.message_handler(commands=['ping'])
 def ping_command(message):
     """Handle /ping command"""
+    logger.info(f"Ping command from user {message.from_user.id}")
     start = datetime.now()
     sent = bot.reply_to(message, "🏓 Pong!")
     end = datetime.now()
     response_time = (end - start).total_seconds() * 1000
-    bot.edit_message_text(
-        f"🏓 Pong! <code>{response_time:.1f}ms</code>",
-        sent.chat.id,
-        sent.message_id
-    )
+    try:
+        bot.edit_message_text(
+            f"🏓 Pong! <code>{response_time:.1f}ms</code>",
+            sent.chat.id,
+            sent.message_id
+        )
+    except Exception as e:
+        logger.error(f"Error editing ping message: {e}")
 
 # Flask routes
 @app.route('/')
@@ -181,24 +192,33 @@ def index():
 def webhook():
     """Handle webhook updates"""
     try:
-        json_data = request.get_json()
-        update = telebot.types.Update.de_json(json_data)
-        bot.process_new_updates([update])
-        return "OK", 200
+        if request.headers.get('content-type') == 'application/json':
+            json_string = request.get_data().decode('utf-8')
+            update = telebot.types.Update.de_json(json_string)
+            bot.process_new_updates([update])
+            return '', 200
+        else:
+            return '', 403
     except Exception as e:
-        logger.error(f"Webhook error: {e}")
-        return "Error", 500
+        logger.error(f"Webhook error: {e}", exc_info=True)
+        return '', 200
 
 if __name__ == '__main__':
-    # Setup webhook
-    webhook_url = f"{WEBHOOK_URL}/webhook"
-    bot.remove_webhook()
-    bot.set_webhook(url=webhook_url)
-    
-    logger.info("🚀 Bot started successfully!")
-    logger.info(f"📡 Webhook: {webhook_url}")
-    logger.info(f"✅ Authorized users: {len(ADMIN_IDS)}")
-    logger.info("⚡ No force join required - All users can access!")
-    
-    # Start Flask app
-    app.run(host='0.0.0.0', port=PORT)
+    try:
+        # Remove old webhook
+        bot.remove_webhook()
+        logger.info("Old webhook removed")
+        
+        # Set new webhook with drop_pending_updates
+        webhook_url = f"{WEBHOOK_URL}/webhook"
+        bot.set_webhook(url=webhook_url, drop_pending_updates=True)
+        
+        logger.info("🚀 Bot started successfully!")
+        logger.info(f"📡 Webhook: {webhook_url}")
+        logger.info(f"✅ Authorized users: {len(ADMIN_IDS)}")
+        logger.info("⚡ No force join - All users can access!")
+        
+        # Start Flask app
+        app.run(host='0.0.0.0', port=PORT, debug=False)
+    except Exception as e:
+        logger.error(f"Startup error: {e}", exc_info=True)
