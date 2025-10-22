@@ -76,7 +76,7 @@ def start_command(message):
         "• Ultra-fast response (under 0.3s)\n"
         "• Works in groups and channels\n"
         "• Simple and efficient\n\n"
-        "Made with ❤️"
+        "Made by @yaplol"
     )
     bot.reply_to(message, welcome_text)
 
