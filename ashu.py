@@ -73,7 +73,7 @@ def start_command(message):
         "• <code>/help</code> - Show help\n"
         "• <code>/ping</code> - Test bot speed\n\n"
         "⚡ <b>Features:</b>\n"
-        "• Ultra-fast response (<0.3s)\n"
+        "• Ultra-fast response (under 0.3s)\n"
         "• Works in groups and channels\n"
         "• Simple and efficient\n\n"
         "Made with ❤️"
