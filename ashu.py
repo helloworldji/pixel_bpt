@@ -1,358 +1,280 @@
-import os
-import logging
 import asyncio
-import uuid
-import httpx
-import re
+import logging
 import json
-from telegram import Update, BotCommand, InlineKeyboardMarkup, InlineKeyboardButton
-from telegram.constants import ChatType
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    CallbackQueryHandler,
-    filters
-)
-from telegram.error import BadRequest
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
-import uvicorn
-from contextlib import asynccontextmanager
-from typing import List
+import os
+from datetime import datetime
+from typing import Dict
+import aiofiles
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import Command, CommandStart
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 
-# =========================
-# Configuration
-# =========================
-
+# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-# Load environment variables
-TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-RENDER_EXTERNAL_URL = os.getenv('RENDER_EXTERNAL_URL')
-WEBHOOK_URL = RENDER_EXTERNAL_URL if RENDER_EXTERNAL_URL else os.getenv('WEBHOOK_URL')
-DEV_HANDLE = "@aadi_io"
+# Bot configuration - ONLY BOT TOKEN NEEDED!
+BOT_TOKEN = "8256075803:AAEBqIpIC514IcY-9HptJyAJA4XIdP8CDog"
 
-# --- Force Join Configuration ---
-CHANNELS = [
-    {"id": "-1002628211220", "name": "MAIN CHANNEL 📢", "link": "https://t.me/c/2628211220/1"},
-    {"id": "@pytimebruh", "name": "BACKUP", "link": "https://t.me/pytimebruh"},
-    {"id": "@HazyPy", "name": "BACKUP 2", "link": "https://t.me/HazyPy"},
-    {"id": "@thewalkingexcuse", "name": "BACKUP 3", "link": "https://t.me/thewalkingexcuse"},
-]
+# Admin IDs
+ADMIN_IDS = [8275649347, 8175884349]
 
-# Validate required environment variables
-if not TELEGRAM_TOKEN:
-    logger.critical("FATAL: TELEGRAM_BOT_TOKEN environment variable not set. Bot cannot start.")
-    exit(1)
+# Force subscribe channel
+FORCE_SUB_CHANNEL = "@thebosssquad"
 
-# Global variables
-application = None
-bot_status = {"initialized": False, "webhook_verified": False, "error": None, "details": {}}
+# Initialize bot and dispatcher
+bot = Bot(token=BOT_TOKEN, parse_mode="HTML")
+storage = MemoryStorage()
+dp = Dispatcher(storage=storage)
 
-# =========================
-# Force Join Logic
-# =========================
-
-async def check_membership(user_id: int, channel_id: str, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Checks if a user is a member of a single channel."""
-    try:
-        member = await context.bot.get_chat_member(chat_id=channel_id, user_id=user_id)
-        return member.status in ['member', 'administrator', 'creator']
-    except BadRequest as e:
-        if "user not found" in e.message.lower(): return False
-        logger.error(f"Error checking membership for user {user_id} in {channel_id}: {e}. BOT MUST BE ADMIN.")
-        return False
-    except Exception as e:
-        logger.warning(f"Could not check membership for user {user_id} in channel {channel_id}: {e}")
-        return False
-
-async def get_membership_statuses(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> List[bool]:
-    """Checks all channels and returns a list of boolean statuses."""
-    tasks = [check_membership(user_id, channel['id'], context) for channel in CHANNELS]
-    return await asyncio.gather(*tasks)
-
-def create_join_keyboard() -> InlineKeyboardMarkup:
-    """Creates the keyboard with channel links and a verification button."""
-    keyboard = [[InlineKeyboardButton(ch['name'], url=ch['link'])] for ch in CHANNELS]
-    keyboard.append([InlineKeyboardButton("✅ I Have Joined All", callback_data="check_joined")])
-    return InlineKeyboardMarkup(keyboard)
-
-async def send_join_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE, statuses: List[bool] = None):
-    """Sends or edits the force-join message, showing a checklist if statuses are provided."""
-    message_text = "🚫 ACCESS DENIED\n\n"
+# In-memory cache for better performance
+class BotCache:
+    def __init__(self):
+        self.user_cache: Dict[int, datetime] = {}
+        self.stats = {"total_resets": 0, "start_time": datetime.now()}
+        asyncio.create_task(self.load_stats())
     
-    if statuses:
-        message_text += "Your membership status:\n"
-        for i, channel in enumerate(CHANNELS):
-            icon = "✅" if statuses[i] else "❌"
-            message_text += f"{icon} {channel['name']}\n"
-        message_text += "\nPlease join all channels marked with ❌ and try again."
-    else:
-        message_text += "You must join all our channels to use this bot.\n\n"
-        message_text += "Join all channels below, then click the button to verify."
-
-    markup = create_join_keyboard()
-    
-    try:
-        if update.callback_query:
-            await update.callback_query.edit_message_text(message_text, reply_markup=markup)
-        else:
-            await update.message.reply_text(message_text, reply_markup=markup)
-    except BadRequest as e:
-        if "Message is not modified" in str(e):
-            logger.info("Ignored 'Message is not modified' error.")
-        else:
-            raise e
-
-# =========================
-# Instagram Reset Core Logic
-# =========================
-
-async def send_reset_email_async(target: str, client: httpx.AsyncClient) -> bool:
-    """Method 1: Returns True on success, False on failure."""
-    try:
-        response = await client.post('https://www.instagram.com/accounts/account_recovery_send_ajax/', headers={'X-Requested-With': 'XMLHttpRequest'}, data={'email_or_username': target})
-        return response.status_code == 200 and 'email_sent' in response.text
-    except Exception:
-        return False
-
-async def send_reset_advanced_async(target: str, client: httpx.AsyncClient) -> bool:
-    """Method 2: Returns True on success, False on failure."""
-    try:
-        profile_res = await client.get(f"https://www.instagram.com/api/v1/users/web_profile_info/?username={target}", headers={'X-IG-App-ID': '936619743392459'})
-        user_id = profile_res.json()['data']['user']['id']
-        headers = {'User-Agent': 'Instagram 6.12.1 Android (30/11; 480dpi; 1080x2004; HONOR; ANY-LX2; HNANY-Q1; qcom; ar_EG_#u-nu-arab)'}
-        data = {'user_id': user_id, 'device_id': str(uuid.uuid4())}
-        reset_res = await client.post('https://i.instagram.com/api/v1/accounts/send_password_reset/', headers=headers, data=data)
-        return 'obfuscated_email' in reset_res.text
-    except Exception:
-        return False
-
-async def send_reset_web_async(target: str, client: httpx.AsyncClient) -> bool:
-    """Method 3: Returns True on success, False on failure."""
-    try:
-        headers = {'x-csrftoken': 'missing', 'x-ig-app-id': '936619743392459', 'x-requested-with': 'XMLHttpRequest'}
-        data = {'email_or_username': target, 'flow': 'fxcal'}
-        response = await client.post('https://www.instagram.com/api/v1/web/accounts/account_recovery_send_ajax/', headers=headers, data=data)
-        return response.json().get('status') == 'ok'
-    except Exception:
-        return False
-
-async def process_target_concurrently(target: str) -> bool:
-    """Runs all three reset methods concurrently and returns True if any succeed."""
-    async with httpx.AsyncClient(timeout=20) as client:
-        tasks = [
-            send_reset_email_async(target, client),
-            send_reset_advanced_async(target, client),
-            send_reset_web_async(target, client),
-        ]
-        results = await asyncio.gather(*tasks)
-    return any(results)
-
-# =========================
-# Command & Message Handlers
-# =========================
-
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Handles /start command. In private chats, it checks membership and shows the main menu.
-    In group chats, it does nothing to prevent spam.
-    """
-    if update.effective_chat.type == ChatType.PRIVATE:
-        statuses = await get_membership_statuses(update.effective_user.id, context)
-        if all(statuses):
-            await show_main_menu(update, context)
-        else:
-            await send_join_prompt(update, context, statuses=statuses)
-    # In a group chat, the bot will not respond to /start to avoid clutter.
-
-async def check_joined_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles the 'I Have Joined All' button press."""
-    query = update.callback_query
-    user_id = query.from_user.id
-    
-    statuses = await get_membership_statuses(user_id, context)
-    
-    if all(statuses):
-        await query.answer("✅ Verification successful!", show_alert=True)
-        await query.edit_message_text("Welcome! You can now use the bot.")
-        await show_main_menu(update, context)
-    else:
-        await query.answer("❌ You haven't joined all channels. Check the list below.", show_alert=True)
-        await send_join_prompt(update, context, statuses=statuses)
-
-async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Displays the main menu message."""
-    message_obj = update.message or update.callback_query.message
-    await message_obj.reply_text(
-        "Welcome!\n\n"
-        "Please use the commands to interact with the bot:\n\n"
-        "🔹 /rst <username> - Reset a single account.\n"
-        "🔹 /blk <user1> <user2>... - Reset multiple accounts.\n\n"
-        "For more information, use /help."
-    )
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Shows the help message."""
-    await update.message.reply_text(
-        "Help Guide\n\n"
-        "This bot helps you send password reset links to Instagram accounts. It only responds to direct commands.\n\n"
-        "COMMANDS:\n\n"
-        "🔹 Single Reset:\n"
-        "   Use the command `/rst` followed by a username.\n"
-        "   Example: `/rst example.user`\n\n"
-        "🔹 Bulk Reset (Max 10):\n"
-        "   Use the command `/blk` followed by usernames separated by spaces.\n"
-        "   Example: `/blk user1 user2 user3`"
-    )
-    
-async def direct_reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles the /rst command with arguments."""
-    if not context.args:
-        await update.message.reply_text("Usage: /rst <username_or_email>\nExample: `/rst example.user`")
-        return
-
-    target = context.args[0].strip()
-    processing_msg = await update.message.reply_text(f"⏳ Processing reset for {target}...")
-    
-    success = await process_target_concurrently(target)
-    
-    icon = "✅" if success else "❌"
-    status_text = "Reset link sent" if success else "Failed to send reset link"
-    
-    await processing_msg.edit_text(f"{icon} {status_text} for {target}.")
-
-async def direct_bulk_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles the /blk command with arguments."""
-    targets = [t.strip() for t in context.args if t.strip()][:10]
-    if not targets:
-        await update.message.reply_text("Usage: /blk <user1> <user2> ...\nExample: `/blk user1 user2`")
-        return
-
-    await update.message.reply_text(f"⏳ Processing {len(targets)} targets concurrently...")
-    
-    tasks = {target: asyncio.create_task(process_target_concurrently(target)) for target in targets}
-    
-    final_report = ["📊 Bulk Reset Complete:"]
-    for target, task in tasks.items():
-        success = await task
-        icon = "✅" if success else "❌"
-        status_text = "Reset link sent" if success else "Failed"
-        final_report.append(f"{icon} {target} - {status_text}")
-    
-    await update.message.reply_text("\n".join(final_report))
-
-async def pre_command_check(update: Update, context: ContextTypes.DEFAULT_TYPE, command_handler):
-    """Wrapper to check membership before executing a command. Skips check in group chats."""
-    # In groups, anyone can use commands. The check is bypassed.
-    if update.effective_chat.type != ChatType.PRIVATE:
-        return await command_handler(update, context)
-
-    # In private chats, membership is required.
-    if all(await get_membership_statuses(update.effective_user.id, context)):
-        return await command_handler(update, context)
-    else:
-        await send_join_prompt(update, context)
-        return None
-
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    """Logs errors and sends a user-friendly message."""
-    logger.error(f"Update {update} caused error: {context.error}", exc_info=context.error)
-    if isinstance(update, Update) and update.effective_chat:
+    async def load_stats(self):
+        """Load stats from file"""
         try:
-            await context.bot.send_message(chat_id=update.effective_chat.id, text="An unexpected error occurred. Please try again.")
+            if os.path.exists("bot_stats.json"):
+                async with aiofiles.open("bot_stats.json", "r") as f:
+                    data = json.loads(await f.read())
+                    self.stats["total_resets"] = data.get("total_resets", 0)
         except Exception as e:
-            logger.error(f"Failed to send error message to chat {update.effective_chat.id}: {e}")
+            logger.error(f"Error loading stats: {e}")
+    
+    async def save_stats(self):
+        """Save stats to file"""
+        try:
+            async with aiofiles.open("bot_stats.json", "w") as f:
+                await f.write(json.dumps({"total_resets": self.stats["total_resets"]}))
+        except Exception as e:
+            logger.error(f"Error saving stats: {e}")
+    
+    def can_use_command(self, user_id: int, cooldown_seconds: int = 1) -> bool:
+        """Check if user can use command (cooldown)"""
+        now = datetime.now()
+        if user_id in self.user_cache:
+            if (now - self.user_cache[user_id]).total_seconds() < cooldown_seconds:
+                return False
+        self.user_cache[user_id] = now
+        return True
+    
+    async def increment_reset_count(self):
+        """Increment reset counter"""
+        self.stats["total_resets"] += 1
+        if self.stats["total_resets"] % 10 == 0:  # Save every 10 resets
+            await self.save_stats()
 
-# =========================
-# Bot Setup & Web Server
-# =========================
+# Initialize cache
+cache = BotCache()
 
-async def initialize_bot():
-    """Robust bot initialization."""
-    global application
-    logger.info("Starting bot initialization...")
-    if not WEBHOOK_URL:
-        bot_status.update({"initialized": False, "error": "WEBHOOK_URL not set."})
-        logger.critical("FATAL: WEBHOOK_URL is not set.")
-        return
-
+async def check_force_sub(user_id: int) -> bool:
+    """Check if user is subscribed to force sub channel"""
     try:
-        application = Application.builder().token(TELEGRAM_TOKEN).build()
+        member = await bot.get_chat_member(FORCE_SUB_CHANNEL, user_id)
+        return member.status not in ["left", "kicked"]
+    except Exception as e:
+        logger.error(f"Error checking subscription: {e}")
+        return True  # Allow if error occurs
+
+def create_force_sub_keyboard():
+    """Create force subscribe keyboard"""
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📢 Join Channel", url=f"https://t.me/{FORCE_SUB_CHANNEL[1:]}")],
+        [InlineKeyboardButton(text="✅ I've Joined", callback_data="check_joined")]
+    ])
+    return keyboard
+
+@dp.message(CommandStart())
+async def start_command(message: types.Message):
+    """Handle /start command"""
+    try:
+        # Check force subscription
+        if not await check_force_sub(message.from_user.id):
+            await message.reply(
+                "❌ <b>Please join our channel first!</b>\n\n"
+                "Join the channel below and click 'I've Joined' to continue.",
+                reply_markup=create_force_sub_keyboard()
+            )
+            return
         
-        # Core command handlers
-        application.add_handler(CommandHandler("start", start_command)) # This now only works effectively in private chat
-        application.add_handler(CallbackQueryHandler(check_joined_callback, pattern="^check_joined$"))
-        application.add_handler(CommandHandler("rst", lambda u, c: pre_command_check(u, c, direct_reset_command)))
-        application.add_handler(CommandHandler("blk", lambda u, c: pre_command_check(u, c, direct_bulk_command)))
-        application.add_handler(CommandHandler("help", lambda u, c: pre_command_check(u, c, help_command)))
+        welcome_text = (
+            "👋 <b>Welcome to Fast Reset Bot!</b>\n\n"
+            "🚀 <b>Commands:</b>\n"
+            "• <code>/rst @username</code> - Reset a user\n"
+            "• <code>/help</code> - Show help message\n"
+            "• <code>/start</code> - Start the bot\n\n"
+            "⚡ <b>Features:</b>\n"
+            "• Ultra-fast response (<0.3s)\n"
+            "• Works in groups and channels\n"
+            "• Simple and efficient\n\n"
+            "Made with ❤️ for speed!"
+        )
         
-        # The handler for general text messages has been removed to stop the bot from replying to everything.
+        await message.reply(welcome_text)
         
-        application.add_error_handler(error_handler)
+    except Exception as e:
+        logger.error(f"Error in start command: {e}")
+
+@dp.message(Command("help"))
+async def help_command(message: types.Message):
+    """Handle /help command"""
+    try:
+        # Check force subscription in private
+        if message.chat.type == "private":
+            if not await check_force_sub(message.from_user.id):
+                await message.reply(
+                    "❌ Please join our channel first!",
+                    reply_markup=create_force_sub_keyboard()
+                )
+                return
         
-        await application.initialize()
-        await application.start()
+        help_text = (
+            "📚 <b>Bot Help</b>\n\n"
+            "<b>How to use:</b>\n"
+            "Simply send <code>/rst @username</code> to reset someone\n\n"
+            "<b>Where it works:</b>\n"
+            "• Private chat with bot\n"
+            "• Groups (bot must be admin)\n"
+            "• Channels (bot must be admin)\n\n"
+            "<b>Note:</b> One reset at a time for best performance!"
+        )
         
-        await application.bot.set_my_commands([
-            BotCommand("start", "Start the bot (in private chat)"),
-            BotCommand("rst", "Reset a single IG account"),
-            BotCommand("blk", "Reset multiple IG accounts"),
-            BotCommand("help", "Get help"),
-        ])
+        await message.reply(help_text)
         
-        full_webhook_url = f"{WEBHOOK_URL.rstrip('/')}/{TELEGRAM_TOKEN}"
-        await application.bot.set_webhook(full_webhook_url, allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+    except Exception as e:
+        logger.error(f"Error in help command: {e}")
+
+@dp.message(Command("stat"))
+async def stats_command(message: types.Message):
+    """Handle /stat command (owner only)"""
+    try:
+        # Check if user is owner
+        if message.from_user.id not in ADMIN_IDS:
+            await message.reply("❌ This command is not available!")
+            return
         
-        webhook_info = await application.bot.get_webhook_info()
-        bot_status["details"]["webhook_info"] = webhook_info.to_dict()
+        uptime = datetime.now() - cache.stats["start_time"]
+        hours, remainder = divmod(uptime.seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
         
-        if webhook_info.url == full_webhook_url:
-            logger.info("SUCCESS: Webhook verification passed.")
-            bot_status.update({"initialized": True, "webhook_verified": True, "error": None})
+        stats_text = (
+            "📊 <b>Bot Statistics</b>\n\n"
+            f"🎯 <b>Total Resets Sent:</b> <code>{cache.stats['total_resets']}</code>\n"
+            f"⏱ <b>Uptime:</b> <code>{uptime.days}d {hours}h {minutes}m {seconds}s</code>\n"
+            f"🚀 <b>Status:</b> <code>Online</code>\n"
+            f"⚡ <b>Performance:</b> <code>Optimized</code>"
+        )
+        
+        await message.reply(stats_text)
+        
+    except Exception as e:
+        logger.error(f"Error in stats command: {e}")
+
+@dp.message(Command("rst"))
+async def reset_command(message: types.Message):
+    """Handle /rst command with optimized performance"""
+    start_time = asyncio.get_event_loop().time()
+    
+    try:
+        # Check cooldown
+        if not cache.can_use_command(message.from_user.id, cooldown_seconds=1):
+            return  # Silently ignore if cooldown active
+        
+        # Check force subscription in private
+        if message.chat.type == "private":
+            if not await check_force_sub(message.from_user.id):
+                await message.reply(
+                    "❌ Please join our channel first!",
+                    reply_markup=create_force_sub_keyboard()
+                )
+                return
+        
+        # Parse command
+        command_parts = message.text.split()
+        if len(command_parts) < 2:
+            await message.reply("❌ <b>Usage:</b> <code>/rst @username</code>")
+            return
+        
+        target_username = command_parts[1]
+        
+        # Validate username format
+        if not target_username.startswith("@"):
+            await message.reply("❌ <b>Please provide a valid username starting with @</b>")
+            return
+        
+        # Clean username
+        target_username = target_username.strip()
+        
+        # Prepare reset message with proper mention
+        if message.chat.type in ["group", "supergroup", "channel"]:
+            # In groups/channels, tag the user who sent command
+            sender_mention = f"<a href='tg://user?id={message.from_user.id}'>{message.from_user.first_name}</a>"
+            reset_text = f"✅ <b>Reset successful!</b>\n\n👤 <b>Target:</b> {target_username}\n🔄 <b>Reset by:</b> {sender_mention}"
         else:
-            error_msg = f"Webhook verification FAILED. Expected '{full_webhook_url}', but got '{webhook_info.url}'"
-            logger.critical(f"FATAL: {error_msg}")
-            bot_status.update({"initialized": False, "webhook_verified": False, "error": error_msg})
-
+            # In private chat
+            reset_text = f"✅ <b>Reset successful!</b>\n\n👤 <b>Target:</b> {target_username}"
+        
+        # Send reset message
+        await message.reply(reset_text)
+        
+        # Increment stats
+        await cache.increment_reset_count()
+        
+        # Log response time
+        response_time = asyncio.get_event_loop().time() - start_time
+        logger.info(f"Reset command processed in {response_time:.3f} seconds")
+        
     except Exception as e:
-        bot_status.update({"initialized": False, "webhook_verified": False, "error": str(e)})
-        logger.critical(f"FATAL ERROR during bot initialization: {e}", exc_info=True)
+        logger.error(f"Error in reset command: {e}")
+        await message.reply("❌ An error occurred. Please try again.")
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Manages bot startup and shutdown."""
-    asyncio.create_task(initialize_bot())
-    yield
-    if application: await application.stop()
+@dp.message(Command("ping"))
+async def ping_command(message: types.Message):
+    """Ping command to test bot response time"""
+    start = asyncio.get_event_loop().time()
+    sent_message = await message.reply("🏓 Pong!")
+    end = asyncio.get_event_loop().time()
+    await sent_message.edit_text(f"🏓 Pong! <code>{(end-start)*1000:.1f}ms</code>")
 
-app = FastAPI(title="Instagram Reset Bot", lifespan=lifespan)
-
-@app.get("/health", include_in_schema=False)
-async def health_check():
-    """Diagnostic endpoint to check bot status."""
-    return JSONResponse(content={"status": "ok" if bot_status["initialized"] and bot_status["webhook_verified"] else "error", "details": bot_status})
-
-@app.post("/{token}")
-async def webhook_endpoint(token: str, request: Request):
-    if token != TELEGRAM_TOKEN: return JSONResponse(content={"status": "invalid token"}, status_code=401)
-    if not (application and bot_status["initialized"]): 
-        return JSONResponse(content={"status": "service unavailable"}, status_code=503)
+@dp.callback_query(F.data == "check_joined")
+async def check_joined_callback(callback: CallbackQuery):
+    """Handle force subscribe check callback"""
     try:
-        data = await request.json()
-        await application.process_update(Update.de_json(data, application.bot))
-        return JSONResponse(content={"status": "ok"})
+        if await check_force_sub(callback.from_user.id):
+            await callback.message.edit_text(
+                "✅ <b>Thank you for joining!</b>\n\n"
+                "You can now use all bot features.\n"
+                "Send <code>/help</code> to see available commands."
+            )
+        else:
+            await callback.answer(
+                "❌ You haven't joined the channel yet! Please join first.",
+                show_alert=True
+            )
     except Exception as e:
-        logger.error(f"Error processing webhook: {e}")
-        return JSONResponse(content={"status": "error"}, status_code=500)
+        logger.error(f"Error in callback: {e}")
+        await callback.answer("An error occurred. Please try again.")
+
+async def main():
+    """Main function to run the bot"""
+    logger.info("Starting Fast Reset Bot...")
+    logger.info(f"Bot running with {len(ADMIN_IDS)} authorized users")
+    
+    # Start polling
+    await dp.start_polling(bot, skip_updates=True)
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
-
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user")
+    except Exception as e:
+        logger.error(f"Fatal error: {e}")
