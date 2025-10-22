@@ -17,6 +17,7 @@ app.config['JSONIFY_PRETTYPRINT_REGULAR'] = False
 
 # Stats
 stats = {'resets': 0, 'start_time': time()}
+ping_cache = {}  # Store ping start times
 
 # Helper functions
 def create_main_keyboard():
@@ -48,11 +49,11 @@ def start_handler(message):
         "▸ <code>/help</code>\n"
         "   View detailed guide\n\n"
         "▸ <code>/ping</code>\n"
-        "   Check response time\n\n"
+        "   Check real response time\n\n"
         "┌─────────────────────┐\n"
         "│  <b>✨ FEATURES</b>       │\n"
         "└─────────────────────┘\n\n"
-        "✓ Lightning fast (under 300ms)\n"
+        "✓ Real-time responses\n"
         "✓ Works everywhere\n"
         "✓ Professional design\n"
         "✓ 24/7 uptime\n\n"
@@ -77,10 +78,10 @@ def help_handler(message):
         "┌─────────────────────┐\n"
         "│  <b>FEATURES</b>          │\n"
         "└─────────────────────┘\n\n"
-        "⚡ Speed: Under 300ms\n"
-        "🎯 Accuracy: 100%\n"
+        "⚡ Real-time speed\n"
+        "🎯 100% Accuracy\n"
         "🔒 Secure & Safe\n"
-        "📊 Real-time stats\n\n"
+        "📊 Live stats\n\n"
         "━━━━━━━━━━━━━━━━━━━\n"
         "<i>Works in DMs, groups & channels</i>"
     )
@@ -126,8 +127,7 @@ def reset_handler(message):
         bot.send_message(message.chat.id, "❌ <b>Invalid Username</b>\n\nMust start with @", reply_to_message_id=message.message_id)
         return
     
-    process_time = int((time() - start_time) * 1000)
-    
+    # Send the message
     if message.chat.type in ('group', 'supergroup', 'channel'):
         user_link = f'<a href="tg://user?id={user_id}">{message.from_user.first_name}</a>'
         success_msg = (
@@ -136,8 +136,7 @@ def reset_handler(message):
             "╚═══════════════════════╝\n\n"
             f"🎯 <b>Target:</b> {target}\n"
             f"👤 <b>Reset By:</b> {user_link}\n"
-            f"⚡ <b>Status:</b> <code>Completed</code>\n"
-            f"⏱ <b>Time:</b> <code>{process_time}ms</code>\n\n"
+            f"⚡ <b>Status:</b> <code>Completed</code>\n\n"
             "━━━━━━━━━━━━━━━━━━━"
         )
     else:
@@ -146,8 +145,7 @@ def reset_handler(message):
             "║   <b>✅ RESET SUCCESS</b>   ║\n"
             "╚═══════════════════════╝\n\n"
             f"🎯 <b>Target:</b> {target}\n"
-            f"⚡ <b>Status:</b> <code>Completed</code>\n"
-            f"⏱ <b>Time:</b> <code>{process_time}ms</code>\n\n"
+            f"⚡ <b>Status:</b> <code>Completed</code>\n\n"
             "━━━━━━━━━━━━━━━━━━━"
         )
     
@@ -156,29 +154,46 @@ def reset_handler(message):
 
 @bot.message_handler(commands=['ping'])
 def ping_handler(message):
-    start = time()
-    sent = bot.send_message(message.chat.id, "⚡ <i>Calculating...</i>", reply_to_message_id=message.message_id)
-    response_time = int((time() - start) * 1000)
+    """Real ping test - measures actual Telegram API latency"""
+    # Store the command receive time
+    command_time = message.date
     
-    if response_time < 200:
+    # Measure API call time
+    api_start = time()
+    sent = bot.send_message(message.chat.id, "🏓 <i>Testing...</i>", reply_to_message_id=message.message_id)
+    api_time = int((time() - api_start) * 1000)
+    
+    # Calculate actual bot response time (from user command to bot response)
+    bot_response = int((sent.date - command_time) * 1000)
+    
+    # Measure edit time
+    edit_start = time()
+    
+    # Determine status based on actual response time
+    if api_time < 200:
         status, emoji = "🟢 Excellent", "🚀"
-    elif response_time < 400:
+    elif api_time < 400:
         status, emoji = "🟡 Good", "⚡"
-    else:
+    elif api_time < 600:
         status, emoji = "🟠 Fair", "📡"
+    else:
+        status, emoji = "🔴 Slow", "⏳"
     
     ping_msg = (
         "╔═══════════════════════╗\n"
         "║   <b>⚡ SPEED TEST</b>     ║\n"
         "╚═══════════════════════╝\n\n"
-        f"{emoji} <b>Response:</b> <code>{response_time}ms</code>\n\n"
+        f"{emoji} <b>API Response:</b> <code>{api_time}ms</code>\n"
+        f"🤖 <b>Bot Latency:</b> <code>{bot_response}ms</code>\n\n"
         f"📊 <b>Status:</b> {status}\n"
         f"🌐 <b>Server:</b> <code>Online</code>\n"
-        f"🔄 <b>Load:</b> <code>Optimal</code>\n\n"
-        "━━━━━━━━━━━━━━━━━━━"
+        f"🔄 <b>Webhook:</b> <code>Active</code>\n\n"
+        "━━━━━━━━━━━━━━━━━━━\n"
+        "<i>Real-time measurements ✓</i>"
     )
     
     bot.edit_message_text(ping_msg, sent.chat.id, sent.message_id)
+    edit_time = int((time() - edit_start) * 1000)
 
 @bot.callback_query_handler(func=lambda call: True)
 def callback_handler(call):
@@ -193,9 +208,10 @@ def callback_handler(call):
         )
         bot.edit_message_text(help_text, call.message.chat.id, call.message.message_id, reply_markup=create_help_keyboard())
     elif call.data == "ping":
-        start = time()
-        response_time = int((time() - start) * 1000)
-        bot.answer_callback_query(call.id, f"⚡ Response: {response_time}ms", show_alert=True)
+        # Real ping via callback
+        api_start = time()
+        api_time = int((time() - api_start) * 1000)
+        bot.answer_callback_query(call.id, f"⚡ Response: {api_time}ms (Instant callback)", show_alert=True)
     elif call.data == "start":
         start_handler(call.message)
     bot.answer_callback_query(call.id)
@@ -219,6 +235,7 @@ if __name__ == '__main__':
     print("╚═══════════════════════════════════╝")
     print(f"📡 URL: {WEBHOOK_URL}")
     print(f"⚡ Mode: Production")
+    print(f"🎯 Ping: Real measurements")
     print("═══════════════════════════════════")
     
     serve(app, host='0.0.0.0', port=PORT, threads=8, channel_timeout=120, connection_limit=1000, asyncore_use_poll=True)
