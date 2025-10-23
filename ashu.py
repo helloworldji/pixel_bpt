@@ -67,7 +67,7 @@ def help_handler(message):
         "• Check spam folder for reset link\n"
         "• Use /start to reset another account\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "<i>Need support? Contact @YourSupport</i>"
+        "<i>Need support? Contact @yaplol</i>"
     )
     
     bot.send_message(message.chat.id, help_text)
